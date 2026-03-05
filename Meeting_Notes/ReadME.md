@@ -4,4 +4,4 @@
 ## Communication Channels
 
 - **Discord**: Used for ongoing project discussions
-- **Google Meet**: Used for meetings with the professor
+- **Google Meet**: Used for meetings with the advisor
