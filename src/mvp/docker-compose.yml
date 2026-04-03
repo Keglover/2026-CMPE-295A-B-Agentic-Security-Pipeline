@@ -1,0 +1,47 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Network isolation (Layer 2 from the sandboxing plan)
+#
+# The "isolated" network has internal: true, which means the container
+# cannot make any outbound connections to the internet or your LAN.
+# This is the safe default for running mock tools.
+#
+# When you add real tools in Sprint 2 (fetch_url making actual HTTP calls):
+#   Option A — Remove internal: true and add an egress proxy allowlist instead.
+#   Option B — Keep internal: true and add a separate "egress" network only for
+#              the tools service, with strict domain-level firewall rules.
+# ---------------------------------------------------------------------------
+
+networks:
+  isolated:
+    driver: bridge
+    internal: true   # no outbound internet access from this container
+
+services:
+  pipeline:
+    build: .
+    container_name: agentic-security-pipeline
+    ports:
+      # 8000 on the host maps to 8000 in the container.
+      # You reach the API at http://localhost:8000 from your Mac.
+      # The container itself cannot call out to the internet.
+      - "8000:8000"
+    volumes:
+      # Only this one directory is shared with your Mac.
+      # The container cannot read or write anywhere else on your filesystem.
+      - ./audit_logs:/app/audit_logs
+    environment:
+      - AUDIT_LOG_PATH=/app/audit_logs/audit.ndjson
+      # Explicitly false: mock executors only. Change to true only inside an
+      # isolated environment once gateway_real.py is fully implemented.
+      - REAL_TOOLS=false
+    networks:
+      - isolated
+    restart: unless-stopped
+    healthcheck:
+      # curl must be available in the image; it is included in python:3.11-slim.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
