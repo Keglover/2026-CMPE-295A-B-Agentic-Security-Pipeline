@@ -25,7 +25,6 @@ and used as a foundation for adding your own detection rules and policies.
 - [Policy threshold table](#policy-threshold-table)
 - [Available tools (mock, sandbox only)](#available-tools-mock-sandbox-only)
 - [Adding your own rules](#adding-your-own-rules)
-- [TODO — Next Steps](#todo--next-steps)
 - [Troubleshooting](#troubleshooting)
 
 ---
