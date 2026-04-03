@@ -36,3 +36,7 @@ secrets.json
 
 # Jupyter
 .ipynb_checkpoints/
+
+
+# PDFs
+*.docx.pdf
