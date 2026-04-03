@@ -1,0 +1,110 @@
+# =============================================================================
+# Tool Proxy — Tool Registry Configuration
+# =============================================================================
+# Project Plan Ref: Tasks 3.3, 3.4, 3.5 (Phase 3 — Core Development: Tool Proxy)
+#
+# This file externalizes the TOOL_SCHEMAS dict currently hardcoded in
+# app/gateway/gateway.py. Once loaded by the gateway at startup, new tools
+# can be added without code changes.
+#
+# TODO: [ ] Task 3.3 — Wire gateway.py to read this file at startup
+# TODO: [ ] Task 3.4 — Add description, risk_tier, privilege_level metadata
+# TODO: [ ] Task 3.5 — Implement POST /tools/register for dynamic registration
+# TODO: [ ] Task 2.8 — Schema evolution strategy (registry versioning)
+# =============================================================================
+
+version: "1.0"
+
+# ---------------------------------------------------------------------------
+# Tool Definitions
+# ---------------------------------------------------------------------------
+# Each tool declares:
+#   - required_args: Arguments that MUST be present (schema validation)
+#   - optional_args: Arguments that MAY be present
+#   - arg_types: Type constraints per argument (for Task 3.7)
+#   - risk_tier: low | medium | high (informs policy overrides)
+#   - description: Human-readable purpose
+#   - enabled: Whether the tool is currently active in the allowlist
+
+tools:
+  summarize:
+    description: "Generate a summary of the provided text"
+    required_args:
+      - text
+    optional_args: []
+    arg_types:
+      text: string
+    arg_constraints:
+      text:
+        max_length: 50000
+    risk_tier: low
+    enabled: true
+
+  write_note:
+    description: "Write a note to the sandbox notes directory"
+    required_args:
+      - title
+      - body
+    optional_args: []
+    arg_types:
+      title: string
+      body: string
+    arg_constraints:
+      title:
+        max_length: 200
+        pattern: "^[a-zA-Z0-9_\\-\\s]+$"
+      body:
+        max_length: 10000
+    risk_tier: medium
+    enabled: true
+
+  search_notes:
+    description: "Search notes by keyword query"
+    required_args:
+      - query
+    optional_args: []
+    arg_types:
+      query: string
+    arg_constraints:
+      query:
+        max_length: 500
+    risk_tier: low
+    enabled: true
+
+  fetch_url:
+    description: "Fetch content from a URL over HTTP"
+    required_args:
+      - url
+    optional_args: []
+    arg_types:
+      url: url
+    arg_constraints:
+      url:
+        max_length: 2048
+    risk_tier: high
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Domain Allowlist (for fetch_url — Task 3.15, 7.1)
+# ---------------------------------------------------------------------------
+# TODO: [ ] Task 3.15 — Enforce domain allowlist in real fetch_url executor
+# TODO: [ ] Task 7.1  — Audit for SSRF (block private IP ranges)
+domain_allowlist:
+  - "example.com"
+  - "en.wikipedia.org"
+  # Add approved domains here. All others are blocked.
+
+# ---------------------------------------------------------------------------
+# Rate Limits (Task 3.20)
+# ---------------------------------------------------------------------------
+# TODO: [ ] Task 3.20 — Implement per-tool rate limiting
+# rate_limits:
+#   default:
+#     requests_per_minute: 60
+#     burst: 10
+#   fetch_url:
+#     requests_per_minute: 10
+#     burst: 3
+#   write_note:
+#     requests_per_minute: 30
+#     burst: 5
