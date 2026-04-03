@@ -1,0 +1,121 @@
+@startuml Implementation Plan and Progress
+
+!define ACCENT_COLOR #3E5A76
+!define PRIMARY_COLOR #5B8DBE
+!define SECONDARY_COLOR #A8D5BA
+!define TERTIARY_COLOR #F4A261
+!define WARNING_COLOR #E76F51
+
+' Styling
+skinparam BackgroundColor #F5F5F5
+skinparam ArrowColor #3E5A76
+skinparam BorderColor #3E5A76
+skinparam ComponentBackgroundColor #E8F4F8
+skinparam ComponentBorderColor #3E5A76
+skinparam DatabaseBackgroundColor #FFF4E6
+skinparam DatabaseBorderColor #F4A261
+skinparam NodeBackgroundColor #E8F4F8
+skinparam NodeBorderColor #3E5A76
+
+title Agentic Security Pipeline: Implementation Plan and Progress
+
+
+package "Deliverable 1: Agent Security Gateway" #5B8DBE {
+    component "Service Interface\n(FastAPI)" as GW_API
+    component "Input Ingestion\n& Normalization" as GW_INGEST
+    component "Tool Calling Interface" as GW_TOOL_CALL
+    component "Structured Audit Events" as GW_AUDIT
+    
+    GW_API -down-> GW_INGEST
+    GW_API -down-> GW_TOOL_CALL
+    GW_API --> GW_AUDIT
+}
+
+package "Deliverable 2: Tool Proxy & Policy Enforcement" #A8D5BA {
+    component "Tool Allowlist\n& Schema Validation" as POL_ALLOWLIST
+    component "Privilege Level\nMatrix" as POL_PRIV
+    component "Gatekeeper Decisions\n(ALLOW/BLOCK/SANITIZE/APPROVE)" as POL_DECISIONS
+    component "Human Approval Gates\n(Medium/High Risk)" as POL_APPROVAL
+    component "Safe Fallbacks\n(Block/Sanitize/Quarantine)" as POL_FALLBACK
+    
+    POL_ALLOWLIST --> POL_DECISIONS
+    POL_PRIV --> POL_DECISIONS
+    POL_DECISIONS --> POL_APPROVAL
+    POL_DECISIONS --> POL_FALLBACK
+    
+    note on link : "Enabled by risk\nscores from D3"
+}
+
+package "Deliverable 3: Prompt Injection Detection Engine" #F4A261 {
+    component "Input Normalizer\n(Unicode, WS, Encoding)" as RISK_NORM
+    component "Rule-Based Detection\n(Attack Categories)" as RISK_RULES
+    component "Hybrid Risk Scorer\n(Rules + Heuristics + Optional ML)" as RISK_SCORE
+    component "Structured Risk Output\n(Score, Category, Rationale)" as RISK_OUTPUT
+    
+    RISK_NORM --> RISK_RULES
+    RISK_RULES --> RISK_SCORE
+    RISK_SCORE --> RISK_OUTPUT
+    
+    note right : "Feeds risk signals\nto D2 & D4"
+}
+
+package "Deliverable 4: Red-Team Harness & Scenario Pack" #E76F51 {
+    component "Benign Task Tests" as TEST_BENIGN
+    component "Attack Scenario Tests\n(Prompt Injection, etc)" as TEST_ATTACK
+    component "Metrics Collection\n(ASR, FPR, Latency)" as TEST_METRICS
+    component "Automated Test Runner\nScript" as TEST_RUNNER
+    
+    TEST_BENIGN --> TEST_METRICS
+    TEST_ATTACK --> TEST_METRICS
+    TEST_METRICS --> TEST_RUNNER
+    
+    note bottom : "Validates D1, D2, D3\nCollects evaluation evidence"
+}
+
+package "Deliverable 5: Deployable Reference Implementation" #3E5A76 {
+    database "Docker Image\n& Compose File" as DEPLOY_DOCKER
+    database "Configuration\nTemplates" as DEPLOY_CONFIG
+    database "Reproducible\nEval Scripts" as DEPLOY_SCRIPTS
+    database "Security\nDisclaimers\n& Docs" as DEPLOY_DOCS
+    
+    DEPLOY_DOCKER --> DEPLOY_CONFIG
+    DEPLOY_CONFIG --> DEPLOY_SCRIPTS
+    DEPLOY_SCRIPTS --> DEPLOY_DOCS
+}
+
+
+' CROSS-DELIVERABLE DEPENDENCIES
+
+GW_INGEST -.-> RISK_NORM: "Input flow"
+GW_INGEST -.-> POL_ALLOWLIST: "Normalized data"
+
+RISK_OUTPUT -.-> POL_DECISIONS: "Risk signals\n(score, category)"
+
+GW_TOOL_CALL -.-> POL_ALLOWLIST: "Requests tool execution"
+POL_FALLBACK -.-> GW_AUDIT: "Fallback decisions logged"
+
+GW_API -.-> TEST_BENIGN: "API contract tested"
+GW_API -.-> TEST_ATTACK: "Attack scenarios tested"
+
+POL_DECISIONS -.-> TEST_METRICS: "Decision outcomes measured"
+
+RISK_SCORE -.-> TEST_METRICS: "Risk accuracy evaluated"
+
+GW_API -.-> DEPLOY_DOCKER: "Containerized"
+POL_ALLOWLIST -.-> DEPLOY_CONFIG: "Tool configs"
+RISK_RULES -.-> DEPLOY_SCRIPTS: "Detection rules packaged"
+TEST_RUNNER -.-> DEPLOY_SCRIPTS: "Eval scripts included"
+
+GW_AUDIT -.-> DEPLOY_DOCS: "Audit schema documented"
+
+
+legend right
+    |<#5B8DBE> D1: Core Interface & Chokepoint |
+    |<#A8D5BA> D2: Enforcement & Control Layer |
+    |<#F4A261> D3: Risk Detection & Scoring |
+    |<#E76F51> D4: Testing & Evaluation |
+    |<#3E5A76> D5: Packaging & Deployment |
+    |<dotted> Cross-deliverable dependency |
+endlegend
+
+@enduml

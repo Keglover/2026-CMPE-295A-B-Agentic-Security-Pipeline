@@ -1,0 +1,9 @@
+16.1 API Gateway & Proxy Patterns
+    Envoy for filtering and fallback 
+Notes: Inference with qwen2.5:7b
+Rego and OPA
+Integration with NeMo Guardrails and Guardrails AI 
+
+http://127.0.0.1:5050/
+
+Push-Location c:\Users\mwase\Desktop\MastersProject\Agentic-Security-Pipeline\tracker; & "C:\Users\mwase\AppData\Local\Python\bin\python3.14.exe" app.py

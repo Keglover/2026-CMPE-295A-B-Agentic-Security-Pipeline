@@ -1,0 +1,45 @@
+@startgantt "Agentic Security Pipeline - Sprint Plan"
+title Tentaive Weekly Sprint Plan (March 2 to May 8, 2026)
+
+Project starts the 2026-03-02
+saturday are closed
+sunday are closed
+
+-- Build --
+[Sprint 1: Interfaces + Architecture Skeleton] as [S1] lasts 5 days
+[Sprint 2: Gateway + Policy Enforcement] as [S2] lasts 5 days and starts at [S1]'s end
+[Sprint 3: Risk Engine + Audit Logging Baseline] as [S3] lasts 5 days and starts at [S2]'s end
+[Sprint 4: End-to-End Integration + 3 Demo Paths] as [S4] lasts 5 days and starts at [S3]'s end
+[Sprint 5: Testing (35+) + Audit Compliance] as [S5] lasts 5 days and starts at [S4]'s end
+
+-- Evaluate --
+[Sprint 6: Baseline vs Protected Comparison] as [S6] lasts 5 days and starts at [S5]'s end
+[Sprint 7: Metrics Analysis + Evaluation Report] as [S7] lasts 5 days and starts at [S6]'s end
+
+-- Ship --
+[Sprint 8: Documentation + Deployment + Reproducibility] as [S8] lasts 5 days and starts at [S7]'s end
+[Sprint 9: Final Integration + Regression + Handoff] as [S9] lasts 10 days and starts at [S8]'s end
+
+[Gate 1: Contracts + skeleton runs] happens at [S1]'s end
+[Gate 2: All modules functional + unit tests] happens at [S3]'s end
+[Gate 3: 3 demo paths + traces captured] happens at [S4]'s end
+[Gate 4: Repro comparison + peer-reviewed report] happens at [S7]'s end
+[Gate 5: Acceptance met + workbook updated] happens at [S9]'s end
+
+' Optional coloring (safe, readable)
+[S1] is colored in LightBlue
+[S2] is colored in LightBlue
+[S3] is colored in LightBlue
+[S4] is colored in LightBlue
+[S5] is colored in LightGreen
+[S6] is colored in LightGreen
+[S7] is colored in LightGreen
+[S8] is colored in Wheat
+[S9] is colored in Wheat
+
+[Gate 1: Contracts + skeleton runs] is colored in Tomato
+[Gate 2: All modules functional + unit tests] is colored in Tomato
+[Gate 3: 3 demo paths + traces captured] is colored in Tomato
+[Gate 4: Repro comparison + peer-reviewed report] is colored in Tomato
+[Gate 5: Acceptance met + workbook updated] is colored in Tomato
+@endgantt
