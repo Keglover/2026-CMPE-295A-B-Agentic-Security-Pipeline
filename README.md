@@ -471,45 +471,6 @@ To adjust policy thresholds, edit `app/policy/engine.py`.
 
 ---
 
-## TODO — Next Steps
-
-### High Priority
-
-- [ ] **Wire config loader to YAML** — Load `config/policy_thresholds.yaml` and `config/tool_registry.yaml` at startup instead of hardcoded values
-- [ ] **Complete PII redaction** — Implement `[REDACTED]` replacement logic in `app/policy/pii_detector.py` (detection patterns already defined)
-- [ ] **Implement `POST /approve/{request_id}`** — Human approval endpoint for REQUIRE_APPROVAL cases (data structures exist in `app/approval/workflow.py`)
-- [ ] **Wire rate limiter into gateway** — `app/gateway/rate_limiter.py` has TokenBucket implementation; needs integration in `gateway.mediate()`
-- [ ] **Wire circuit breaker into gateway** — `app/gateway/circuit_breaker.py` has state machine; needs integration for downstream tool failures
-
-### Medium Priority
-
-- [ ] **Implement real tool executors** — Complete `app/gateway/gateway_real.py` (currently raises `NotImplementedError`)
-  - `fetch_url`: HTTP client with domain allowlist
-  - `write_note`: Filesystem-sandboxed writes
-  - `summarize`: LLM API integration
-  - `search_notes`: Query-sanitized search
-- [ ] **Add argument type/value validation** — Enforce `arg_types` and `arg_constraints` from `config/tool_registry.yaml` in gateway
-- [ ] **Add tool-specific policy overrides** — Per-tool threshold customization
-- [ ] **Complete approval workflow** — Timeout auto-deny, approval audit trail, background enforcement loop
-- [ ] **Implement `GET /history` endpoint** — Query audit log via API with filtering
-- [ ] **Implement `GET /policy/stats` endpoint** — Aggregate policy decision statistics
-
-### Testing & Evaluation
-
-- [ ] **Expand scenario pack to 12+ scenarios** in `scripts/run_scenarios.py`
-- [ ] **Add adversarial test suite** — Many-shot jailbreak, base64-encoded payloads, multi-turn injection
-- [ ] **Implement latency benchmarks** — Target < 200ms p95
-- [ ] **Measure false positive rate** — Target FPR < 5%
-- [ ] **Add contract assertion middleware** for structured error propagation
-
-### Deployment & Packaging
-
-- [ ] **Add egress proxy** for Docker network when real HTTP tools are enabled
-- [ ] **Add CI/CD pipeline** — Automated testing on push
-- [ ] **Add health check dashboard** — Monitoring for production deployments
-
----
-
 ## Troubleshooting
 
 **`ModuleNotFoundError: No module named 'fastapi'`**
