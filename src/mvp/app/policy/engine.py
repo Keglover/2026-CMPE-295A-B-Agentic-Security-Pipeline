@@ -26,6 +26,7 @@ from app.models import PolicyAction, PolicyResult, RiskCategory, RiskResult
 # Threshold constants — change here, tests update everywhere
 # ---------------------------------------------------------------------------
 
+IMMEDIATE_BLOCK_THRESHOLD = 95
 BLOCK_THRESHOLD = 80
 QUARANTINE_THRESHOLD = 60
 APPROVAL_THRESHOLD = 35
@@ -50,6 +51,16 @@ def decide(risk: RiskResult) -> PolicyResult:
     """
     score = risk.risk_score
     categories = set(risk.risk_categories)
+
+    # --Critical block for extremely high risk, no questions asked ---
+    if score >= IMMEDIATE_BLOCK_THRESHOLD:
+        return PolicyResult(
+            request_id=risk.request_id,
+            policy_action=PolicyAction.BLOCK,
+            policy_reason="Critical risk >= IMMEDIATE_BLOCK_THRESHOLD. Immediate block.",
+            requires_approval=False,
+        )
+    
 
     # --- Hard block for very high risk ---
     if score >= BLOCK_THRESHOLD:
