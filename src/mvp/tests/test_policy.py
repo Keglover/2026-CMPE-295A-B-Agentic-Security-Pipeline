@@ -108,6 +108,12 @@ def test_very_high_score_produces_block():
     assert result.policy_action == PolicyAction.BLOCK
     assert result.requires_approval is False
 
+def test_immediate_block_threshold():
+    from app.models import PolicyAction
+
+    result = decide(_risk(score=96))
+    assert result.policy_action == PolicyAction.BLOCK
+    assert "Immediate block" in result.policy_reason
 
 def test_policy_result_includes_reason():
     """Every policy result must include a non-empty policy_reason."""
