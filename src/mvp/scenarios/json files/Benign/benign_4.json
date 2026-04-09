@@ -1,0 +1,14 @@
+{
+    "content": "",
+    "source_type": "",
+    "proposed_tool": "",
+    "tool_args": {
+
+    },
+
+    "_expected": {
+        "policy_action": "",
+        "gateway_decision": "",
+        "max_risk_score": 0
+    }
+}
