@@ -183,4 +183,6 @@ class PipelineResponse(BaseModel):
     risk: RiskResult
     policy: PolicyResult
     gateway: GatewayResult | None = None
+    sanitization_applied: bool = False
+    pii_found: list[str] = Field(default_factory=list)
     summary: str = ""

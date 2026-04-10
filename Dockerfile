@@ -11,11 +11,19 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source
+# Copy application source and config
 COPY app/ ./app/
+COPY config/ ./config/
 
-# Create the audit log directory inside the container
-RUN mkdir -p /app/audit_logs
+# Create directories inside the container
+RUN mkdir -p /app/audit_logs /app/sandbox/notes
+
+# Create non-root user for security
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid appuser --no-create-home appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
 
 # Expose the FastAPI port
 EXPOSE 8000

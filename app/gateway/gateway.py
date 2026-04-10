@@ -7,33 +7,24 @@ Responsibility: Act as the ONLY execution path for tool calls.
 No tool call may bypass this module — that is the hard enforcement boundary.
 
 On every call the gateway checks:
-  1. Tool is on the allowlist.
-  2. Required arguments are present and pass schema validation.
-  3. The policy action permits execution (ALLOW or SANITIZE only).
+1. Tool is on the allowlist.
+2. Required arguments are present and pass schema validation.
+3. The policy action permits execution (ALLOW or SANITIZE only).
+4. Rate limit is not exceeded.
+5. Circuit breaker allows the request.
 
 If any check fails the gateway returns DENIED with a reason code.
 If all checks pass it routes to the selected executor set and returns the result.
 
 Executor selection (controlled by REAL_TOOLS env var):
-  REAL_TOOLS=false (default) → gateway_mock.py  — safe stubs, no side effects
-  REAL_TOOLS=true            → gateway_real.py  — real network/FS calls; only
-                                                   activate inside an isolated
-                                                   Docker container with network
-                                                   restrictions enabled.
-
-TODO List (from Project Plan):
-    - [ ] Task 3.3  — Load TOOL_SCHEMAS from config/tool_registry.yaml
-    - [ ] Task 3.7  — Implement argument type validation (string, int, URL)
-    - [ ] Task 3.8  — Implement argument value constraints (max length, patterns)
-    - [ ] Task 3.12 — Implement REQUIRE_APPROVAL hold-and-wait logic
-    - [ ] Task 3.13 — Implement configurable approval timeout with auto-deny
-    - [ ] Task 3.20 — Wire rate_limiter.py into mediate() before execution
-    - [ ] Task 3.21 — Wire circuit_breaker.py for downstream tool failures
-    - [ ] Task 3.23 — Implement request deduplication
+REAL_TOOLS=false (default) → gateway_mock.py  — safe stubs, no side effects
+REAL_TOOLS=true            → gateway_real.py  — real network/FS calls; only activate inside 
+                            an isolated Docker container with network restrictions enabled.
 """
 
 from __future__ import annotations
 
+import logging as _logging
 import os
 from typing import Any
 
@@ -44,52 +35,61 @@ from app.models import (
     PolicyResult,
     PipelineRequest,
 )
+from app.policy.config_loader import load_tool_registry
+from app.gateway.rate_limiter import rate_limiter
+from app.gateway.circuit_breaker import circuit_registry
+from app.approval.workflow import approval_manager
+
+_log = _logging.getLogger("gateway")
 
 # ---------------------------------------------------------------------------
 # Executor selection — controlled at startup via environment variable.
-# Defaults to mock (safe) so developers can never accidentally run real tools
-# without explicitly opting in.
 # ---------------------------------------------------------------------------
 
-# Reason: read once at import time so the decision is visible in logs and
-# cannot change mid-run from a request payload.
 _USE_REAL_TOOLS: bool = os.getenv("REAL_TOOLS", "false").strip().lower() == "true"
 
 if _USE_REAL_TOOLS:
     from app.gateway.gateway_real import EXECUTORS as _TOOL_EXECUTORS
-
     _executor_mode = "REAL"
 else:
     from app.gateway.gateway_mock import EXECUTORS as _TOOL_EXECUTORS
-
     _executor_mode = "MOCK"
 
-import logging as _logging
-
-_logging.getLogger("gateway").info(
+_log.info(
     "Tool executor mode: %s (set REAL_TOOLS=true to activate real tools)",
     _executor_mode,
 )
 
 # ---------------------------------------------------------------------------
-# Tool schema registry
-# Each tool declares its required argument names.
-# TODO: [ ] Task 3.3 — Replace with config_loader.load_tool_registry()
-# TODO: [ ] Task 3.4 — Add description, risk_tier, privilege_level metadata
+# Tool schema registry — loaded from config/tool_registry.yaml (Task 3.3)
 # ---------------------------------------------------------------------------
 
+_registry = load_tool_registry()
+_tools_config: dict = _registry.get("tools", {})
+
+# Build TOOL_SCHEMAS in the same format the rest of the code expects:
+#   { "tool_name": ["required_arg1", "required_arg2", ...] }
+# Only include enabled tools.
 TOOL_SCHEMAS: dict[str, list[str]] = {
-    "summarize": ["text"],
-    "write_note": ["title", "body"],
-    "search_notes": ["query"],
-    "fetch_url": ["url"],
+    name: info.get("required_args", [])
+    for name, info in _tools_config.items()
+    if info.get("enabled", True)
 }
 
-# Tools that are permitted to execute (may be a subset of TOOL_SCHEMAS)
 TOOL_ALLOWLIST: set[str] = set(TOOL_SCHEMAS.keys())
+
+# Domain allowlist for fetch_url (consumed by gateway_real.py)
+DOMAIN_ALLOWLIST: list[str] = _registry.get("domain_allowlist", ["example.com"])
+
+REGISTRY_VERSION: str = str(_registry.get("version", "unknown"))
 
 # Policy actions that permit execution
 EXECUTABLE_ACTIONS: set[PolicyAction] = {PolicyAction.ALLOW, PolicyAction.SANITIZE}
+
+_log.info(
+    "Tool registry loaded (v%s): %s",
+    REGISTRY_VERSION, sorted(TOOL_ALLOWLIST),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +104,8 @@ def mediate(
     """
     Evaluate a proposed tool call and either execute or deny it.
 
-    Args:
-        request (PipelineRequest): Original request, carries proposed_tool
-                                   and tool_args.
-        policy (PolicyResult): Decision from the policy engine.
-
-    Returns:
-        GatewayResult: EXECUTED with tool output, or DENIED with reason.
+    Checks: tool proposed → allowlist → policy gate → rate limit →
+            circuit breaker → schema → approval → execute.
     """
     req_id = request.request_id
     tool_name = request.proposed_tool
@@ -137,12 +132,48 @@ def mediate(
 
     # --- Policy gate: only ALLOW and SANITIZE permit execution ---
     if policy.policy_action not in EXECUTABLE_ACTIONS:
+        # If REQUIRE_APPROVAL, submit to approval queue instead of flat deny
+        if policy.policy_action == PolicyAction.REQUIRE_APPROVAL:
+            approval_manager.submit(
+                request_id=req_id,
+                risk_score=0,  # actual score is in policy_reason text
+                risk_categories=[],
+                proposed_tool=tool_name,
+            )
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Awaiting human approval. Request '{req_id}' has been "
+                    f"queued. Use POST /approve/{req_id} to approve."
+                ),
+            )
         return GatewayResult(
             request_id=req_id,
             gateway_decision=GatewayDecision.DENIED,
             decision_reason=(
                 f"Policy action '{policy.policy_action.value}' does not permit "
                 f"tool execution. Reason: {policy.policy_reason}"
+            ),
+        )
+
+    # --- Rate limit check (Task 3.20) ---
+    if not rate_limiter.check(tool_name):
+        return GatewayResult(
+            request_id=req_id,
+            gateway_decision=GatewayDecision.DENIED,
+            decision_reason=f"Rate limit exceeded for tool '{tool_name}'. Try again later.",
+        )
+
+    # --- Circuit breaker check (Task 3.21) ---
+    cb = circuit_registry.get(tool_name)
+    if not cb.allow_request():
+        return GatewayResult(
+            request_id=req_id,
+            gateway_decision=GatewayDecision.DENIED,
+            decision_reason=(
+                f"Circuit breaker OPEN for tool '{tool_name}'. "
+                f"Backend is experiencing failures; request rejected to prevent cascade."
             ),
         )
 
@@ -160,7 +191,17 @@ def mediate(
 
     # --- All checks passed: route to executor ---
     executor = _TOOL_EXECUTORS[tool_name]
-    output = executor(tool_args)
+    try:
+        output = executor(tool_args)
+        cb.record_success()
+    except Exception as exc:
+        cb.record_failure()
+        _log.error("Executor failed for tool '%s': %s", tool_name, exc)
+        return GatewayResult(
+            request_id=req_id,
+            gateway_decision=GatewayDecision.DENIED,
+            decision_reason=f"Tool '{tool_name}' execution failed: {exc}",
+        )
 
     return GatewayResult(
         request_id=req_id,

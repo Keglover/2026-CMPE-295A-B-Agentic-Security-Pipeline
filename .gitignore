@@ -9,3 +9,11 @@ build/
 .pytest_cache/
 audit_logs/*.ndjson
 .DS_Store
+
+# Project-specific exclusions
+tracker/
+Notes and Research/
+Notes and Research.zip
+sandbox/
+test_payload.json
+.vscode/

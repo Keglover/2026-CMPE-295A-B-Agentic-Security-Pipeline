@@ -31,23 +31,49 @@ TODO List (from Project Plan):
 
 from __future__ import annotations
 
+import logging
+
 from app.models import PolicyAction, PolicyResult, RiskCategory, RiskResult
+from app.policy.config_loader import load_policy_config
+
+_log = logging.getLogger("policy_engine")
 
 # ---------------------------------------------------------------------------
-# Threshold constants — change here, tests update everywhere
-# TODO: [ ] Task 4.4 — Replace with config_loader.load_policy_config()
+# Load thresholds from config/policy_thresholds.yaml (Task 4.4)
+# Falls back to hardcoded defaults if the YAML file is missing.
 # ---------------------------------------------------------------------------
 
-BLOCK_THRESHOLD = 80
-QUARANTINE_THRESHOLD = 60
-APPROVAL_THRESHOLD = 35
-SANITIZE_THRESHOLD = 15
+_config = load_policy_config()
+_thresholds = _config.get("thresholds", {})
+
+BLOCK_THRESHOLD: int = _thresholds.get("block", 80)
+QUARANTINE_THRESHOLD: int = _thresholds.get("quarantine", 60)
+APPROVAL_THRESHOLD: int = _thresholds.get("require_approval", 35)
+SANITIZE_THRESHOLD: int = _thresholds.get("sanitize", 15)
 
 # Categories that warrant human approval even at lower score
-HIGH_ATTENTION_CATEGORIES = {
-    RiskCategory.TOOL_COERCION,
-    RiskCategory.DATA_EXFILTRATION,
+_ha_cats = _config.get("high_attention_categories", ["TOOL_COERCION", "DATA_EXFILTRATION"])
+HIGH_ATTENTION_CATEGORIES: set[RiskCategory] = {
+    RiskCategory(c) for c in _ha_cats if c in RiskCategory.__members__
 }
+
+# Minimum score for high-attention override to activate
+_HIGH_ATTENTION_MIN_SCORE: int = _config.get("high_attention_min_score", SANITIZE_THRESHOLD)
+
+# Fail-closed defaults (used by main.py when risk engine is unreachable)
+_fail_closed = _config.get("fail_closed", {})
+FAIL_CLOSED_ACTION: str = _fail_closed.get("default_action", "BLOCK")
+FAIL_CLOSED_REASON: str = _fail_closed.get(
+    "default_reason", "Risk Engine unreachable — fail-closed to BLOCK"
+)
+
+POLICY_VERSION: str = str(_config.get("version", "unknown"))
+
+_log.info(
+    "Policy config loaded (v%s): BLOCK>=%d QUARANTINE>=%d APPROVAL>=%d SANITIZE>=%d",
+    POLICY_VERSION, BLOCK_THRESHOLD, QUARANTINE_THRESHOLD,
+    APPROVAL_THRESHOLD, SANITIZE_THRESHOLD,
+)
 
 
 def decide(risk: RiskResult) -> PolicyResult:
@@ -89,7 +115,7 @@ def decide(risk: RiskResult) -> PolicyResult:
 
     # --- High-attention categories bump to approval even at medium score ---
     if score >= APPROVAL_THRESHOLD or (
-        HIGH_ATTENTION_CATEGORIES & categories and score >= SANITIZE_THRESHOLD
+        HIGH_ATTENTION_CATEGORIES & categories and score >= _HIGH_ATTENTION_MIN_SCORE
     ):
         return PolicyResult(
             request_id=risk.request_id,

@@ -145,8 +145,9 @@ def test_registry_health_summary() -> None:
     registry = CircuitBreakerRegistry()
     registry.get("healthy_tool")
     failing = registry.get("failing_tool")
-    failing._failure_count = 999
-    failing._state = CircuitState.OPEN
+    # Use record_failure to properly transition to OPEN state
+    for _ in range(failing.failure_threshold):
+        failing.record_failure()
     summary = registry.health_summary()
     assert summary["healthy_tool"] == "closed"
     assert summary["failing_tool"] == "open"
