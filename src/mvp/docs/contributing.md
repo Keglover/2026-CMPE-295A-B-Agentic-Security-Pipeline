@@ -2,7 +2,7 @@
 
 ## Task Tracking
 
-**All tasks live on GitHub Issues**: https://github.com/razzacktiger/Agentic-Security-Pipeline/issues
+**All tasks live on GitHub Issues**: https://github.com/Keglover/2026-CMPE-295A-B-Agentic-Security-Pipeline/issues
 
 `TASK.md` is a read-only summary maintained by Member A. **Do not edit TASK.md on your branch** — this avoids merge conflicts.
 

@@ -85,7 +85,7 @@ def record(
     # Append as a single line of JSON
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
-
+    
     _log.info(
         "AUDIT request_id=%s action=%s score=%d gateway=%s",
         entry["request_id"],
