@@ -12,10 +12,13 @@ Supported providers (all use the openai Python package):
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+_log = logging.getLogger("agent.config")
 
 # Reason: load .env from the mvp/ root so secrets are picked up automatically
 # without needing to `export` them manually in every terminal session.
@@ -27,8 +30,14 @@ OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: str | None = os.environ.get("OPENAI_BASE_URL") or None
 MODEL: str = os.environ.get("AGENT_MODEL", "gpt-4o-mini")
 
+if not OPENAI_API_KEY:
+    _log.warning("OPENAI_API_KEY is not set — the agent will fail when calling the LLM")
+
 # Pipeline connection — the FastAPI server must be running
 PIPELINE_URL: str = os.environ.get("PIPELINE_URL", "http://localhost:8000/pipeline")
 
 # Safety cap: max tool-call round-trips before the agent stops
-MAX_ITERATIONS: int = int(os.environ.get("AGENT_MAX_ITERATIONS", "5"))
+try:
+    MAX_ITERATIONS: int = max(1, min(int(os.environ.get("AGENT_MAX_ITERATIONS", "5")), 50))
+except ValueError:
+    MAX_ITERATIONS: int = 5
