@@ -30,6 +30,11 @@ def _print_trace(result: dict) -> None:
         result: The dict returned by run_agent_turn().
     """
     print(f"\n--- Turn Summary ---")
+    prescreened = result.get("prompt_prescreened", False)
+    blocked = result.get("prompt_blocked", False)
+    print(f"Pre-screened:       {prescreened}")
+    if blocked:
+        print(f"Prompt BLOCKED:     True  (prompt was redacted from conversation)")
     print(f"Tool calls made:    {result['tool_calls_made']}")
     print(f"Tool calls blocked: {result['tool_calls_blocked']}")
 
@@ -37,8 +42,9 @@ def _print_trace(result: dict) -> None:
         risk = trace.get("risk", {})
         policy = trace.get("policy", {})
         gw = trace.get("gateway") or {}
+        label = "pre-screen" if i == 1 and prescreened else "tool-call"
         print(
-            f"  [{i}] score={risk.get('risk_score', '?')}"
+            f"  [{i}:{label}] score={risk.get('risk_score', '?')}"
             f"  action={policy.get('policy_action', '?')}"
             f"  gateway={gw.get('gateway_decision', 'N/A')}"
             f"  signals={risk.get('matched_signals', [])}"
@@ -74,7 +80,7 @@ def _run_interactive(verbose: bool) -> None:
 
         print(f"\nAssistant: {result['reply']}")
 
-        if verbose or result["tool_calls_blocked"] > 0:
+        if verbose or result["tool_calls_blocked"] > 0 or result.get("prompt_blocked"):
             _print_trace(result)
 
 
@@ -91,7 +97,7 @@ def _run_single(payload: str, verbose: bool) -> None:
     print(f"Assistant: {result['reply']}")
     _print_trace(result)
 
-    if result["tool_calls_blocked"] > 0:
+    if result["tool_calls_blocked"] > 0 or result.get("prompt_blocked"):
         sys.exit(1)
 
 
