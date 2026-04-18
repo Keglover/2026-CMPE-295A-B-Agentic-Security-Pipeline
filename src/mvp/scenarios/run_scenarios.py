@@ -233,11 +233,12 @@ def processScenarios():
 
     _log.info("=== Begin log analysis ===")
 
-    benignPassed, benignFailed, skipBenign = {}, {}, False
+    benignPassed, benignFailed, benignSkipped = {}, {}, []
     if benignScenarios is not None:
         for scenarioFile in benignScenarios:
             if scenarioFile.name not in benignResponses:
                 _log.warning(f"Skipping analysis for {scenarioFile.name} - no response recorded")
+                benignSkipped.append(scenarioFile.name)
                 continue
             
             scenarioResponse = benignResponses[scenarioFile.name]
@@ -249,13 +250,13 @@ def processScenarios():
                 benignFailed.setdefault(key, []).extend(f[key])
     else:
         _log.warning("No benign scenarios. Skipping analysis of benign scenarios.")
-        skipBenign = True
 
-    malPassed, malFailed, skipMalicious = {}, {}, False
+    malPassed, malFailed, malSkipped = {}, {}, []
     if maliciousScenarios is not None:
         for scenarioFile in maliciousScenarios:
             if scenarioFile.name not in maliciousResponses:
                 _log.warning(f"Skipping analysis for {scenarioFile.name} - no response recorded")
+                malSkipped.append(scenarioFile.name)
                 continue
             
             scenarioResponse = maliciousResponses[scenarioFile.name]
@@ -267,7 +268,6 @@ def processScenarios():
                 malFailed.setdefault(key, []).extend(f[key])
     else:
         _log.warning("No malicious scenarios. Skipping analysis of malicious scenarios.")
-        skipMalicious = True
 
     def aggregate(analysis):
         numPolicy, numGateway, numRisk = 0, 0, 0
@@ -290,27 +290,38 @@ def processScenarios():
     _log.info("=== Log analysis results ===")
     _log.info("Passed:")
 
-    b_numPassed_policy, b_numPassed_gateway, b_numPassed_risk = (aggregate(benignPassed) if benignPassed or not skipBenign else -1, -1, -1)
-    m_numPassed_policy, m_numPassed_gateway, m_numPassed_risk = (aggregate(malPassed)    if malPassed or not skipMalicious else -1, -1, -1)
+    b_numPassed_policy, b_numPassed_gateway, b_numPassed_risk = (aggregate(benignPassed))
+    m_numPassed_policy, m_numPassed_gateway, m_numPassed_risk = (aggregate(malPassed))
 
     _log.info("Failed:")
 
-    b_numFailed_policy, b_numFailed_gateway, b_numFailed_risk = (aggregate(benignFailed) if benignFailed or not skipBenign else -1, -1, -1)
-    m_numFailed_policy, m_numFailed_gateway, m_numFailed_risk = (aggregate(malFailed)    if malFailed or not skipMalicious else -1, -1, -1)
+    b_numFailed_policy, b_numFailed_gateway, b_numFailed_risk = (aggregate(benignFailed))
+    m_numFailed_policy, m_numFailed_gateway, m_numFailed_risk = (aggregate(malFailed))
 
-    _log.info("Statistics: (-1 indicates a skipped field)")
+    _log.info("Statistics:")
 
     _log.info("policy_action:")
-    _log.info(f"Benign PASS: {b_numPassed_policy}    | Benign FAIL: {b_numFailed_policy}")
-    _log.info(f"Malicious PASS: {m_numPassed_policy} | Malicious FAIL: {m_numFailed_policy}")
+    _log.info(f"Benign PASS: {b_numPassed_policy}       | Benign FAIL: {b_numFailed_policy}")
+    _log.info(f"Malicious PASS: {m_numPassed_policy}    | Malicious FAIL: {m_numFailed_policy}")
 
     _log.info("gateway_decision:")
-    _log.info(f"Benign PASS: {b_numPassed_gateway}    | Benign FAIL: {b_numFailed_gateway}")
-    _log.info(f"Malicious PASS: {m_numPassed_gateway} | Malicious FAIL: {m_numFailed_gateway}")
+    _log.info(f"Benign PASS: {b_numPassed_gateway}      | Benign FAIL: {b_numFailed_gateway}")
+    _log.info(f"Malicious PASS: {m_numPassed_gateway}   | Malicious FAIL: {m_numFailed_gateway}")
 
     _log.info("risk_score:")
-    _log.info(f"Benign PASS: {b_numPassed_risk}    | Benign FAIL: {b_numFailed_risk}")
-    _log.info(f"Malicious PASS: {m_numPassed_risk} | Malicious FAIL: {m_numFailed_risk}")
+    _log.info(f"Benign PASS: {b_numPassed_risk}         | Benign FAIL: {b_numFailed_risk}")
+    _log.info(f"Malicious PASS: {m_numPassed_risk}      | Malicious FAIL: {m_numFailed_risk}")
+
+    _log.info(f"Skipped scenarios:")
+    if benignSkipped:
+        _log.info("Benign:")
+        for skipped in benignSkipped:
+            _log.info(f"{skipped}")
+
+    if malSkipped:
+        _log.info("Malicious:")
+        for skipped in malSkipped:
+            _log.info(f"{skipped}")
 
 # ---------------------------------------------------------------------------
 # Helper function to analyze responses
@@ -348,11 +359,11 @@ def responseAnalysis(result, expected, scenarioName):
                 _log.warning(outputString)
                 failed[index].append((scenarioName, outputString))
 
-    _log.info("Responses v Expectations for %s as follows:", scenarioName)
+    _log.info(f"= {scenarioName} - Responses v Expectations as follows: =")
     check(result_PolicyAction,      expected_PolicyAction,      "policy_action")
     check(result_GatewayDecision,   expected_GatewayDecision,   "gateway_decision")
     check(result_RiskScore,         expected_RiskScore,         "risk_score")
-    _log.info("End Responses v Expectations for %s.", scenarioName)
+    _log.info(f"= {scenarioName} - End Responses v Expectations =")
 
     return passed, failed
 
@@ -362,8 +373,8 @@ def responseAnalysis(result, expected, scenarioName):
 
 def healthCheck():
     _log.info("=== Scenario Runner starting ===")
-    _log.info("Base URL : %s", BASE_URL)
-    _log.info("Scenarios: %s", SCENARIOS_DIR)
+    _log.info(f"Base URL : {BASE_URL}")
+    _log.info(f"Scenarios: {SCENARIOS_DIR}")
 
     # Step 1: health gate — abort immediately if server is down
     if not check_health():

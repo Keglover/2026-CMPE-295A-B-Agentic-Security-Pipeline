@@ -7,7 +7,7 @@
     },
 
     "_expected": {
-        "policy_action": "BLOCKED",
+        "policy_action": "BLOCK",
         "gateway_decision": "DENIED",
         "max_risk_score": 100
     },
