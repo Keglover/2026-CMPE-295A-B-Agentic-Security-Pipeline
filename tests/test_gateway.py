@@ -35,6 +35,7 @@ def _request(
     tool: str | None,
     args: dict | None = None,
     req_id: str = "gw-test",
+    agent_id: str | None = None,
 ) -> PipelineRequest:
     return PipelineRequest(
         content="test input",
@@ -42,6 +43,7 @@ def _request(
         proposed_tool=tool,
         tool_args=args,
         request_id=req_id,
+        agent_id=agent_id,
     )
 
 
@@ -135,3 +137,22 @@ def test_no_tool_proposed_returns_denied():
     result = mediate(req, _policy(PolicyAction.ALLOW))
 
     assert result.gateway_decision == GatewayDecision.DENIED
+
+
+def test_rate_limit_isolated_by_agent():
+    """Exhausting one agent's bucket should not affect another agent."""
+    req_a = _request("summarize", {"text": "hello"}, req_id="a1", agent_id="agent-a")
+    req_b = _request("summarize", {"text": "hello"}, req_id="b1", agent_id="agent-b")
+
+    # Spend most of agent-a budget quickly.
+    for i in range(10):
+        result = mediate(req_a.model_copy(update={"request_id": f"a-{i}"}), _policy(PolicyAction.ALLOW, req_id=f"a-{i}"))
+    # One extra call should be denied for agent-a at default burst.
+    denied = mediate(req_a.model_copy(update={"request_id": "a-over"}), _policy(PolicyAction.ALLOW, req_id="a-over"))
+
+    # Agent-b should still execute with a fresh bucket.
+    allowed_b = mediate(req_b, _policy(PolicyAction.ALLOW, req_id="b1"))
+
+    assert denied.gateway_decision == GatewayDecision.DENIED
+    assert "agent-a" in denied.decision_reason
+    assert allowed_b.gateway_decision == GatewayDecision.EXECUTED

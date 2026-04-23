@@ -75,6 +75,7 @@ def record(
     """
     entry: dict = {
         "request_id": request.request_id,
+        "agent_id": request.agent_id or "anonymous",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source_type": request.source_type.value,
         "content_hash": _sha256_prefix(request.content),
@@ -86,6 +87,11 @@ def record(
         "requires_approval": policy.requires_approval,
         "gateway_decision": gateway.gateway_decision.value if gateway else None,
         "gateway_reason": gateway.decision_reason if gateway else None,
+        "rate_limited": (
+            gateway is not None
+            and gateway.gateway_decision.value == "DENIED"
+            and "rate limit exceeded" in gateway.decision_reason.lower()
+        ),
     }
 
     # Ensure the log directory exists

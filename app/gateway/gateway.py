@@ -18,8 +18,8 @@ If all checks pass it routes to the selected executor set and returns the result
 
 Executor selection (controlled by REAL_TOOLS env var):
 REAL_TOOLS=false (default) → gateway_mock.py  — safe stubs, no side effects
-REAL_TOOLS=true            → gateway_real.py  — real network/FS calls; only activate inside 
-                            an isolated Docker container with network restrictions enabled.
+REAL_TOOLS=true            → sandbox workers  — real network/FS calls via sandbox HTTP boundary
+                            with network restrictions enabled.
 """
 
 from __future__ import annotations
@@ -28,6 +28,9 @@ import logging as _logging
 import os
 from typing import Any
 
+from app.approval.workflow import approval_manager
+from app.gateway.circuit_breaker import circuit_registry
+from app.gateway.executor_policy import run_with_policy
 from app.models import (
     GatewayDecision,
     GatewayResult,
@@ -37,28 +40,8 @@ from app.models import (
 )
 from app.policy.config_loader import load_tool_registry
 from app.gateway.rate_limiter import rate_limiter
-from app.gateway.circuit_breaker import circuit_registry
-from app.approval.workflow import approval_manager
 
 _log = _logging.getLogger("gateway")
-
-# ---------------------------------------------------------------------------
-# Executor selection — controlled at startup via environment variable.
-# ---------------------------------------------------------------------------
-
-_USE_REAL_TOOLS: bool = os.getenv("REAL_TOOLS", "false").strip().lower() == "true"
-
-if _USE_REAL_TOOLS:
-    from app.gateway.gateway_real import EXECUTORS as _TOOL_EXECUTORS
-    _executor_mode = "REAL"
-else:
-    from app.gateway.gateway_mock import EXECUTORS as _TOOL_EXECUTORS
-    _executor_mode = "MOCK"
-
-_log.info(
-    "Tool executor mode: %s (set REAL_TOOLS=true to activate real tools)",
-    _executor_mode,
-)
 
 # ---------------------------------------------------------------------------
 # Tool schema registry — loaded from config/tool_registry.yaml (Task 3.3)
@@ -66,6 +49,9 @@ _log.info(
 
 _registry = load_tool_registry()
 _tools_config: dict = _registry.get("tools", {})
+
+_sandbox_config: dict = _registry.get("sandbox", {})
+SANDBOX_ENABLED: bool = bool(_sandbox_config.get("enabled", False))
 
 # Build TOOL_SCHEMAS in the same format the rest of the code expects:
 #   { "tool_name": ["required_arg1", "required_arg2", ...] }
@@ -91,6 +77,33 @@ _log.info(
     REGISTRY_VERSION, sorted(TOOL_ALLOWLIST),
 )
 
+# ---------------------------------------------------------------------------
+# Executor selection — controlled at startup via environment variable.
+# ---------------------------------------------------------------------------
+
+_USE_REAL_TOOLS: bool = os.getenv("REAL_TOOLS", "false").strip().lower() == "true"
+
+if _USE_REAL_TOOLS:
+    if not SANDBOX_ENABLED:
+        raise RuntimeError(
+            "REAL_TOOLS=true requires sandbox.enabled=true so real tools run only in the sandbox."
+        )
+    from app.gateway.sandbox_client import build_sandbox_executor
+
+    _TOOL_EXECUTORS = {
+        tool_name: build_sandbox_executor(tool_name)
+        for tool_name in TOOL_ALLOWLIST
+    }
+    _executor_mode = "SANDBOX"
+else:
+    from app.gateway.gateway_mock import EXECUTORS as _TOOL_EXECUTORS
+    _executor_mode = "MOCK"
+
+_log.info(
+    "Tool executor mode: %s (set REAL_TOOLS=true to activate real tools)",
+    _executor_mode,
+)
+
 
 # ---------------------------------------------------------------------------
 # Gateway entry point
@@ -108,6 +121,7 @@ def mediate(
             circuit breaker → schema → approval → execute.
     """
     req_id = request.request_id
+    agent_id = (request.agent_id or "anonymous").strip() or "anonymous"
     tool_name = request.proposed_tool
     tool_args = request.tool_args or {}
 
@@ -158,11 +172,14 @@ def mediate(
         )
 
     # --- Rate limit check (Task 3.20) ---
-    if not rate_limiter.check(tool_name):
+    if not rate_limiter.check(tool_name, agent_id=agent_id):
         return GatewayResult(
             request_id=req_id,
             gateway_decision=GatewayDecision.DENIED,
-            decision_reason=f"Rate limit exceeded for tool '{tool_name}'. Try again later.",
+            decision_reason=(
+                f"Rate limit exceeded for agent '{agent_id}' on tool "
+                f"'{tool_name}'. Try again later."
+            ),
         )
 
     # --- Circuit breaker check (Task 3.21) ---
@@ -189,11 +206,19 @@ def mediate(
             ),
         )
 
-    # --- All checks passed: route to executor ---
+    # --- All checks passed: route to executor (with timeout + retry policy) ---
     executor = _TOOL_EXECUTORS[tool_name]
     try:
-        output = executor(tool_args)
+        output = run_with_policy(tool_name, executor, tool_args)
         cb.record_success()
+    except TimeoutError as exc:
+        cb.record_failure()
+        _log.warning("Executor timed out for tool '%s': %s", tool_name, exc)
+        return GatewayResult(
+            request_id=req_id,
+            gateway_decision=GatewayDecision.DENIED,
+            decision_reason=str(exc),
+        )
     except Exception as exc:
         cb.record_failure()
         _log.error("Executor failed for tool '%s': %s", tool_name, exc)

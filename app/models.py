@@ -85,6 +85,10 @@ class PipelineRequest(BaseModel):
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique request identifier",
     )
+    agent_id: str | None = Field(
+        default=None,
+        description="Identifier of the calling agent; defaults to anonymous if omitted",
+    )
 
 
 # ---------------------------------------------------------------------------

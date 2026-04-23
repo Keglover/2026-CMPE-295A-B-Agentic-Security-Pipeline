@@ -95,16 +95,100 @@ domain_allowlist:
   # Add approved domains here. All others are blocked.
 
 # ---------------------------------------------------------------------------
+# Sandbox Execution Topology
+# ---------------------------------------------------------------------------
+sandbox:
+  enabled: true
+  endpoints:
+    tools: "http://sandbox-tools:8001"
+    llm: "http://sandbox-llm:8003"
+  tool_routes:
+    fetch_url: tools
+    write_note: tools
+    search_notes: tools
+    summarize: llm
+
+egress_proxy:
+  endpoint: "http://egress-proxy:8002"
+  max_response_bytes: 10485760
+
+# ---------------------------------------------------------------------------
 # Rate Limits (Task 3.20)
 # ---------------------------------------------------------------------------
-# TODO: [ ] Task 3.20 — Implement per-tool rate limiting
-# rate_limits:
-#   default:
-#     requests_per_minute: 60
-#     burst: 10
-#   fetch_url:
-#     requests_per_minute: 10
-#     burst: 3
-#   write_note:
-#     requests_per_minute: 30
-#     burst: 5
+rate_limits:
+  global:
+    requests_per_minute: 60
+    burst: 10
+  by_tool:
+    fetch_url:
+      requests_per_minute: 10
+      burst: 3
+    write_note:
+      requests_per_minute: 30
+      burst: 5
+
+# ---------------------------------------------------------------------------
+# Execution Policy — timeout and retry semantics per tool
+# ---------------------------------------------------------------------------
+# timeout_sec:    Wall-clock seconds before the executor call is abandoned.
+# retry:
+#   max_attempts: Total attempts (1 = no retry, 2 = one retry, etc.)
+#   backoff_base: Initial wait in seconds between attempts (exponential).
+#   backoff_max:  Upper cap on wait time in seconds.
+#   retryable:    Substrings in the error message that permit a retry.
+#                 Errors NOT matching are treated as permanent failures and
+#                 will NOT be retried (e.g. validation errors, auth failures).
+execution:
+  defaults:
+    timeout_sec: 10.0
+    retry:
+      max_attempts: 1        # No retry by default — override per tool below
+      backoff_base: 0.5
+      backoff_max: 5.0
+      retryable:
+        - "timeout"
+        - "connect"
+        - "temporarily unavailable"
+
+  by_tool:
+    summarize:
+      # LLM inference can be slow: generous timeout, one retry on transient error.
+      timeout_sec: 90.0
+      retry:
+        max_attempts: 2
+        backoff_base: 1.0
+        backoff_max: 10.0
+        retryable:
+          - "timeout"
+          - "connect"
+          - "temporarily unavailable"
+
+    write_note:
+      # Pure filesystem operation: tight timeout, no retry (idempotency risk).
+      timeout_sec: 5.0
+      retry:
+        max_attempts: 1
+
+    search_notes:
+      # Read-only filesystem glob: tight timeout, safe to retry once.
+      timeout_sec: 5.0
+      retry:
+        max_attempts: 2
+        backoff_base: 0.25
+        backoff_max: 1.0
+        retryable:
+          - "timeout"
+
+    fetch_url:
+      # External HTTP: medium timeout, retry transient network errors.
+      timeout_sec: 15.0
+      retry:
+        max_attempts: 3
+        backoff_base: 0.5
+        backoff_max: 5.0
+        retryable:
+          - "timeout"
+          - "connect"
+          - "temporarily unavailable"
+          - "503"
+          - "429"

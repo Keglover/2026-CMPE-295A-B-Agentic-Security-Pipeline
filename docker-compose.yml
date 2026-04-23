@@ -1,27 +1,27 @@
-version: "3.9"
-
 # ---------------------------------------------------------------------------
 # Network configuration
 #
-# "pipeline-net" connects the pipeline and Ollama containers.
-# When REAL_TOOLS=false (default), no outbound internet is needed.
-# When REAL_TOOLS=true, remove "internal: true" or add an egress network
-# so fetch_url can reach the allowlisted domains.
+# control-net: internal-only traffic for pipeline, sandbox, proxy, and Ollama.
+# egress-net: only the egress proxy is attached so sandbox HTTP must traverse
+#             the proxy boundary for outbound access.
+# host-net:   port publishing for user-facing services.
 # ---------------------------------------------------------------------------
 
 networks:
-  pipeline-net:
+  control-net:
     driver: bridge
-    internal: true   # no outbound internet access — safe for mock tools
+    internal: true
+  egress-net:
+    driver: bridge
   host-net:
-    driver: bridge     # non-internal network for host port publishing
+    driver: bridge
 
 services:
   # -------------------------------------------------------------------------
   # Ollama — local LLM inference server (powers the 'summarize' real tool)
   #
   # Models are stored in the ollama_data volume so they persist across
-  # container restarts. Pull a model once: docker exec ollama ollama pull mistral
+  # container restarts. Pull a model once: docker exec ollama ollama pull qwen2.5:7b
   # -------------------------------------------------------------------------
   ollama:
     image: ollama/ollama:latest
@@ -31,7 +31,7 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     networks:
-      - pipeline-net
+      - control-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "ollama list || exit 1"]
@@ -50,20 +50,26 @@ services:
       - "8000:8000"
     volumes:
       - ./audit_logs:/app/audit_logs
-      - ./sandbox/notes:/app/sandbox/notes
       - ./config:/app/config:ro
     environment:
       - AUDIT_LOG_PATH=/app/audit_logs/audit.ndjson
-      - REAL_TOOLS=false
+      - REAL_TOOLS=true
       # Ollama connection — used when REAL_TOOLS=true for the summarize tool
       - OLLAMA_HOST=http://ollama:11434
-      - LLM_MODEL=mistral
-      - SANDBOX_DIR=/app/sandbox/notes
+      - LLM_MODEL=qwen2.5:7b
+      - SANDBOX_TOOLS_URL=http://sandbox-tools:8001
+      - SANDBOX_LLM_URL=http://sandbox-llm:8003
     networks:
-      - pipeline-net
+      - control-net
       - host-net
     depends_on:
       ollama:
+        condition: service_healthy
+      sandbox-tools:
+        condition: service_healthy
+      sandbox-llm:
+        condition: service_healthy
+      egress-proxy:
         condition: service_healthy
     restart: unless-stopped
     security_opt:
@@ -72,6 +78,91 @@ services:
       - ALL
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  sandbox-tools:
+    build: .
+    container_name: agentic-security-sandbox-tools
+    command: ["uvicorn", "app.sandbox.service:app", "--host", "0.0.0.0", "--port", "8001"]
+    volumes:
+      - ./sandbox/notes:/app/sandbox/notes
+      - ./config:/app/config:ro
+    environment:
+      - SANDBOX_ALLOWED_TOOLS=fetch_url,write_note,search_notes
+      - SANDBOX_DIR=/app/sandbox/notes
+      - EGRESS_PROXY_URL=http://egress-proxy:8002
+    networks:
+      - control-net
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  sandbox-llm:
+    build: .
+    container_name: agentic-security-sandbox-llm
+    command: ["uvicorn", "app.sandbox.service:app", "--host", "0.0.0.0", "--port", "8003"]
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      - SANDBOX_ALLOWED_TOOLS=summarize
+      - OLLAMA_HOST=http://ollama:11434
+      - LLM_MODEL=qwen2.5:7b
+    networks:
+      - control-net
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  egress-proxy:
+    build: .
+    container_name: agentic-security-egress-proxy
+    command: ["uvicorn", "app.sandbox.proxy_service:app", "--host", "0.0.0.0", "--port", "8002"]
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - control-net
+      - egress-net
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\" || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

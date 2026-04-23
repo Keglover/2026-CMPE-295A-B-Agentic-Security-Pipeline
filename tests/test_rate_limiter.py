@@ -71,20 +71,37 @@ def test_bucket_remaining_count() -> None:
 def test_limiter_allows_default() -> None:
     """Default rate limiter should allow requests within burst."""
     limiter = RateLimiter(default_rpm=60, default_burst=5)
-    assert limiter.check("summarize") is True
+    assert limiter.check("summarize", agent_id="agent-a") is True
 
 
 def test_limiter_per_tool_independence() -> None:
     """Rate limits should be independent per tool."""
     limiter = RateLimiter(default_rpm=60, default_burst=2)
-    limiter.check("summarize")
-    limiter.check("summarize")
-    assert limiter.check("summarize") is False  # Exhausted
-    assert limiter.check("fetch_url") is True   # Different tool, fresh bucket
+    limiter.check("summarize", agent_id="agent-a")
+    limiter.check("summarize", agent_id="agent-a")
+    assert limiter.check("summarize", agent_id="agent-a") is False  # Exhausted
+    assert limiter.check("fetch_url", agent_id="agent-a") is True   # Different tool, fresh bucket
 
 
 def test_limiter_remaining() -> None:
     """remaining should reflect per-tool token count."""
     limiter = RateLimiter(default_rpm=60, default_burst=10)
-    limiter.check("write_note")
-    assert limiter.remaining("write_note") == 9
+    limiter.check("write_note", agent_id="agent-a")
+    assert limiter.remaining("write_note", agent_id="agent-a") == 9
+
+
+def test_limiter_per_agent_independence() -> None:
+    """Different agents should not share token buckets for the same tool."""
+    limiter = RateLimiter(default_rpm=60, default_burst=1)
+
+    assert limiter.check("summarize", agent_id="agent-a") is True
+    assert limiter.check("summarize", agent_id="agent-a") is False
+    assert limiter.check("summarize", agent_id="agent-b") is True
+
+
+def test_limiter_anonymous_normalization() -> None:
+    """None/blank agent IDs should map to the same anonymous bucket."""
+    limiter = RateLimiter(default_rpm=60, default_burst=1)
+
+    assert limiter.check("summarize", agent_id=None) is True
+    assert limiter.check("summarize", agent_id="") is False

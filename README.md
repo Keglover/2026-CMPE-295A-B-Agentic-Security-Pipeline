@@ -58,7 +58,7 @@ User/Agent Input
   │  circuit breaker → schema check → EXECUTE               │
   │                                                         │
   │  Executors:                                             │
-  │    • summarize    → Ollama / Mistral 7B (local LLM)     │
+  │    • summarize    → Ollama / qwen2.5:7b (local LLM)     │
   │    • write_note   → sandboxed filesystem                │
   │    • search_notes → filesystem glob                     │
   │    • fetch_url    → httpx + domain allowlist + SSRF     │
@@ -76,13 +76,13 @@ The gateway enforces six sequential checks before any tool executes. If any chec
 | Mode | Env var | What happens |
 |------|---------|-------------|
 | Mock (default) | `REAL_TOOLS=false` | All four tools return safe stub responses. No network, no LLM. |
-| Real | `REAL_TOOLS=true` | `summarize` calls Mistral 7B via Ollama. `fetch_url` makes HTTP requests. `write_note`/`search_notes` use a sandboxed filesystem. |
+| Real | `REAL_TOOLS=true` | All real tools execute via sandbox workers. `summarize` calls qwen2.5:7b via Ollama. `fetch_url` uses the egress proxy. `write_note`/`search_notes` use a sandboxed filesystem. |
 
 ---
 
 ## Option A — Docker with Ollama (primary)
 
-This is the recommended way to test the pipeline with real LLM inference. Docker Compose starts two containers: the pipeline (FastAPI) and Ollama (local LLM server).
+This is the recommended way to test the pipeline with real LLM inference. Docker Compose starts the pipeline, Ollama, sandbox-tools, sandbox-llm, and the egress proxy.
 
 ### Prerequisites
 
@@ -90,7 +90,7 @@ This is the recommended way to test the pipeline with real LLM inference. Docker
 |-------------|---------------|
 | Docker Desktop | `docker --version` |
 | Docker Compose v2 | `docker compose version` |
-| ~8 GB free disk | Mistral 7B model is ~4.4 GB |
+| ~8 GB free disk | Model size varies; qwen2.5:7b is multi-GB |
 | ~8 GB RAM | Minimum for LLM inference on CPU |
 
 ### Step 1 — Start the containers
@@ -108,17 +108,17 @@ docker ps --format "table {{.Names}}\t{{.Status}}"
 
 Both containers should show `healthy` within ~30 seconds.
 
-### Step 2 — Pull the Mistral model (first time only)
+### Step 2 — Pull the qwen2.5:7b model (first time only)
 
 The Docker network is `internal: true` by default (no internet from inside containers). To pull the model:
 
-1. In `docker-compose.yml`, temporarily change `internal: true` to `internal: false` under `pipeline-net`
+1. In `docker-compose.yml`, temporarily change `internal: true` to `internal: false` under `control-net`
 2. Restart and pull:
 
 ```bash
 docker compose down
 docker compose up -d
-docker exec ollama ollama pull mistral
+docker exec ollama ollama pull qwen2.5:7b
 ```
 
 3. Restore `internal: true` and restart:
@@ -175,7 +175,7 @@ curl -s -X POST http://localhost:8000/pipeline \
   }' | python3 -m json.tool
 ```
 
-With `REAL_TOOLS=true`, the response `gateway.tool_output` contains an actual Mistral 7B summary. With `REAL_TOOLS=false`, it returns a mock string.
+With `REAL_TOOLS=true`, the response `gateway.tool_output` contains an actual qwen2.5:7b summary. With `REAL_TOOLS=false`, it returns a mock string.
 
 > **Note:** The first request takes 30–60 seconds as Ollama loads the model into RAM. Subsequent requests are fast.
 
@@ -183,7 +183,7 @@ With `REAL_TOOLS=true`, the response `gateway.tool_output` contains an actual Mi
 
 ```bash
 docker compose down          # stop containers, keep volumes (model persists)
-docker compose down -v       # stop and delete volumes (removes the Mistral model)
+docker compose down -v       # stop and delete volumes (removes the model)
 ```
 
 ### Docker security controls
@@ -205,7 +205,7 @@ To use a different Ollama model (e.g., `llama3`, `phi3`, `gemma`):
 docker exec ollama ollama pull <model_name>
 ```
 
-Then set `LLM_MODEL=<model_name>` in `docker-compose.yml` and restart.
+Then set `LLM_MODEL=<model_name>` in `docker-compose.yml` (pipeline + sandbox-llm) and restart.
 
 ---
 
@@ -251,15 +251,37 @@ Install Ollama on your machine, pull the model, then start the server with real 
 ```bash
 # Install Ollama (https://ollama.com/download)
 ollama serve &
-ollama pull mistral
+ollama pull qwen2.5:7b
 
+# Start local sandbox workers and proxy (required when REAL_TOOLS=true)
+# Terminal A (tools sandbox)
+SANDBOX_ALLOWED_TOOLS=fetch_url,write_note,search_notes SANDBOX_DIR=./sandbox/notes \
+  EGRESS_PROXY_URL=http://localhost:8002 python -m uvicorn app.sandbox.service:app --reload --port 8001
+
+# Terminal B (llm sandbox)
+SANDBOX_ALLOWED_TOOLS=summarize OLLAMA_HOST=http://localhost:11434 LLM_MODEL=qwen2.5:7b \
+  python -m uvicorn app.sandbox.service:app --reload --port 8003
+
+# Terminal C (egress proxy for fetch_url)
+python -m uvicorn app.sandbox.proxy_service:app --reload --port 8002
+
+# Terminal D (pipeline)
 # macOS / Linux
-REAL_TOOLS=true OLLAMA_HOST=http://localhost:11434 SANDBOX_DIR=./sandbox/notes \
-  python -m uvicorn app.main:app --reload --port 8000
+REAL_TOOLS=true OLLAMA_HOST=http://localhost:11434 SANDBOX_TOOLS_URL=http://localhost:8001 \
+  SANDBOX_LLM_URL=http://localhost:8003 python -m uvicorn app.main:app --reload --port 8000
 
 # Windows PowerShell
-$env:REAL_TOOLS="true"; $env:OLLAMA_HOST="http://localhost:11434"; $env:SANDBOX_DIR="./sandbox/notes"
+$env:REAL_TOOLS="true"; $env:OLLAMA_HOST="http://localhost:11434"; $env:SANDBOX_TOOLS_URL="http://localhost:8001"; $env:SANDBOX_LLM_URL="http://localhost:8003"
 python -m uvicorn app.main:app --reload --port 8000
+
+# Windows PowerShell (sandbox workers and proxy - separate terminals)
+$env:SANDBOX_ALLOWED_TOOLS="fetch_url,write_note,search_notes"; $env:SANDBOX_DIR="./sandbox/notes"; $env:EGRESS_PROXY_URL="http://localhost:8002"
+python -m uvicorn app.sandbox.service:app --reload --port 8001
+
+$env:SANDBOX_ALLOWED_TOOLS="summarize"; $env:OLLAMA_HOST="http://localhost:11434"; $env:LLM_MODEL="qwen2.5:7b"
+python -m uvicorn app.sandbox.service:app --reload --port 8003
+
+python -m uvicorn app.sandbox.proxy_service:app --reload --port 8002
 ```
 
 ---
@@ -271,7 +293,7 @@ python -m uvicorn app.main:app --reload --port 8000
 python -m pytest tests/ -v
 ```
 
-75 tests across 9 test files. All tests run in mock mode — no Docker or Ollama needed.
+All tests run in mock mode — no Docker or Ollama needed.
 
 ```bash
 # Individual modules
@@ -284,6 +306,37 @@ python -m pytest tests/test_approval.py -v
 python -m pytest tests/test_circuit_breaker.py -v
 python -m pytest tests/test_rate_limiter.py -v
 python -m pytest tests/test_ingest.py -v
+```
+
+### Docker-based tests (Windows/macOS/Linux)
+
+These run inside the pipeline container and are useful for verifying the Docker image.
+
+```bash
+docker compose run --rm pipeline python -m pytest tests/test_sandbox_client.py tests/test_sandbox_service.py -v
+docker compose run --rm pipeline python -m pytest tests/ -v
+```
+
+### Tool smoke tests with Docker (real mode)
+
+Start the stack (`REAL_TOOLS=true` in docker-compose.yml), then hit each tool:
+
+```bash
+curl -s -X POST http://localhost:8000/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Summarize","source_type":"direct_prompt","proposed_tool":"summarize","tool_args":{"text":"Quick summary test."}}'
+
+curl -s -X POST http://localhost:8000/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Write note","source_type":"direct_prompt","proposed_tool":"write_note","tool_args":{"title":"docker test","body":"hello"}}'
+
+curl -s -X POST http://localhost:8000/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Search notes","source_type":"direct_prompt","proposed_tool":"search_notes","tool_args":{"query":"docker"}}'
+
+curl -s -X POST http://localhost:8000/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Fetch url","source_type":"direct_prompt","proposed_tool":"fetch_url","tool_args":{"url":"https://example.com"}}'
 ```
 
 ### Scenario evaluation
@@ -502,7 +555,7 @@ Defined in `config/tool_registry.yaml`. Only `enabled: true` tools appear in the
 
 | Tool | Required args | Risk tier | Real behavior |
 |------|--------------|-----------|---------------|
-| `summarize` | `text` | low | Calls Ollama (Mistral 7B) |
+| `summarize` | `text` | low | Calls Ollama (qwen2.5:7b) |
 | `write_note` | `title`, `body` | medium | Writes `.md` to sandboxed `notes/` directory |
 | `search_notes` | `query` | low | Globs `*.md` in sandbox, keyword search |
 | `fetch_url` | `url` | high | HTTP GET with domain allowlist + SSRF protection |
@@ -538,8 +591,10 @@ Defined in `config/tool_registry.yaml`. Only `enabled: true` tools appear in the
 |----------|---------|-------------|
 | `REAL_TOOLS` | `false` | `true` for real executors, `false` for mock stubs |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL (Docker: `http://ollama:11434`) |
-| `LLM_MODEL` | `mistral` | Ollama model name for the `summarize` tool |
+| `LLM_MODEL` | `qwen2.5:7b` | Ollama model name for the `summarize` tool |
 | `SANDBOX_DIR` | `/app/sandbox/notes` | Directory for `write_note`/`search_notes` |
+| `SANDBOX_TOOLS_URL` | `http://sandbox-tools:8001` | Sandbox worker for fetch_url/write_note/search_notes |
+| `SANDBOX_LLM_URL` | `http://sandbox-llm:8003` | Sandbox worker for summarize |
 
 ---
 

@@ -21,6 +21,7 @@ import ipaddress
 import logging
 import os
 import re
+from html import unescape
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
@@ -36,13 +37,30 @@ _log = logging.getLogger("gateway_real")
 # ---------------------------------------------------------------------------
 
 _OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-_LLM_MODEL = os.getenv("LLM_MODEL", "mistral")
+_LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b")
+_EGRESS_PROXY_URL = os.getenv("EGRESS_PROXY_URL", "").strip() or None
 
 # Sandbox directory — /app/sandbox/notes/ in Docker, ./sandbox/notes/ locally
 _SANDBOX_DIR = Path(os.getenv("SANDBOX_DIR", "/app/sandbox/notes"))
 
 # Domain allowlist — loaded from gateway.py at import time; fallback here
 _DOMAIN_ALLOWLIST: set[str] | None = None
+
+
+def _tool_timeout(tool_name: str, fallback: float) -> float:
+    """
+    Return the httpx-level timeout for a real executor.
+
+    Set to 90 % of the policy timeout so the executor raises a descriptive
+    httpx error before executor_policy fires the hard wall-clock kill.
+    Falls back to *fallback* if the registry is unavailable.
+    """
+    try:
+        from app.gateway.executor_policy import _load_policy  # local import avoids circular
+        policy_timeout = _load_policy(tool_name).timeout_sec
+        return max(1.0, policy_timeout * 0.9)
+    except Exception:
+        return fallback
 
 
 def _get_domain_allowlist() -> set[str]:
@@ -93,6 +111,15 @@ def _strip_html(html: str) -> str:
     return stripper.get_text()
 
 
+def _normalize_text_response(text: str) -> str:
+    """Collapse whitespace and cap text output to 5000 chars."""
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 5000:
+        text = text[:5000] + "... [truncated]"
+    return text
+
+
 # ---------------------------------------------------------------------------
 # SSRF protection — block private/internal IP ranges
 # ---------------------------------------------------------------------------
@@ -129,7 +156,7 @@ def _real_summarize(args: dict[str, Any]) -> str:
     Call Ollama (local LLM inference server) to summarize text.
 
     Requires Ollama running at OLLAMA_HOST with model LLM_MODEL pulled.
-    Default: http://localhost:11434 with 'mistral' model.
+    Default: http://localhost:11434 with 'qwen2.5:7b' model.
     """
     text = str(args.get("text", ""))
     if not text.strip():
@@ -144,8 +171,9 @@ def _real_summarize(args: dict[str, Any]) -> str:
         f"Text:\n{text}\n\nSummary:"
     )
 
+    _timeout = _tool_timeout("summarize", fallback=60.0)
     try:
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=_timeout) as client:
             resp = client.post(
                 f"{_OLLAMA_HOST}/api/generate",
                 json={
@@ -161,7 +189,7 @@ def _real_summarize(args: dict[str, Any]) -> str:
                 return "Error: LLM returned an empty response."
             return summary
     except httpx.TimeoutException:
-        raise RuntimeError(f"Ollama request timed out after 60s (model: {_LLM_MODEL})")
+        raise RuntimeError(f"Ollama request timed out after {_timeout:.0f}s (model: {_LLM_MODEL})")
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(f"Ollama returned HTTP {exc.response.status_code}: {exc.response.text[:200]}")
     except httpx.ConnectError:
@@ -303,8 +331,35 @@ def _real_fetch_url(args: dict[str, Any]) -> str:
             f"Allowed domains: {sorted(allowlist)}."
         )
 
+    if _EGRESS_PROXY_URL:
+        _timeout = _tool_timeout("fetch_url", fallback=10.0)
+        try:
+            with httpx.Client(timeout=_timeout) as client:
+                resp = client.post(
+                    f"{_EGRESS_PROXY_URL}/fetch",
+                    json={"url": url},
+                    headers={"User-Agent": "AgenticSecurityPipeline/0.2"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = str(data.get("content", "")).strip()
+                if not content:
+                    return "Page fetched but no text content found."
+                return _normalize_text_response(content)
+        except httpx.TimeoutException:
+            return f"Error: request to '{hostname}' timed out after {_timeout:.0f}s."
+        except httpx.HTTPStatusError as exc:
+            try:
+                detail = exc.response.json().get("detail", exc.response.text)
+            except Exception:
+                detail = exc.response.text
+            return f"Error: {detail}"
+        except httpx.ConnectError:
+            return f"Error: could not connect to proxy for '{hostname}'."
+
+    _timeout = _tool_timeout("fetch_url", fallback=10.0)
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=True, max_redirects=3) as client:
+        with httpx.Client(timeout=_timeout, follow_redirects=True, max_redirects=3) as client:
             resp = client.get(url, headers={"User-Agent": "AgenticSecurityPipeline/0.2"})
             resp.raise_for_status()
 
@@ -312,25 +367,19 @@ def _real_fetch_url(args: dict[str, Any]) -> str:
             content = resp.text[:_MAX_RESPONSE_BYTES]
 
             # Strip HTML to extract text
-            text = _strip_html(content)
-            # Collapse whitespace
-            text = re.sub(r"\s+", " ", text).strip()
-
-            # Return first 5000 chars
-            if len(text) > 5000:
-                text = text[:5000] + "... [truncated]"
+            text = _normalize_text_response(_strip_html(content))
 
             return text if text else "Page fetched but no text content found."
 
     except httpx.TimeoutException:
-        return f"Error: request to '{hostname}' timed out after 10s."
+        return f"Error: request to '{hostname}' timed out after {_timeout:.0f}s."
     except httpx.HTTPStatusError as exc:
         return f"Error: HTTP {exc.response.status_code} from '{hostname}'."
     except httpx.ConnectError:
         return f"Error: could not connect to '{hostname}'."
 
 
-# Exported registry consumed by gateway.py
+# Exported registry consumed by sandbox service
 EXECUTORS: dict[str, Callable[[dict[str, Any]], str]] = {
     "summarize": _real_summarize,
     "write_note": _real_write_note,
