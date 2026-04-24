@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import httpx
 
+from app.gateway.executor_policy import _load_policy
 from app.policy.config_loader import load_tool_registry
 
 
@@ -64,13 +65,23 @@ def _sandbox_endpoint_for_tool(tool_name: str) -> str:
     )
 
 
+def _client_timeout_for_tool(tool_name: str) -> float:
+    """Derive client timeout from execution policy for the given tool."""
+    try:
+        timeout_sec = float(_load_policy(tool_name).timeout_sec)
+        return max(1.0, timeout_sec * 0.95)
+    except Exception:
+        return 10.0
+
+
 def build_sandbox_executor(tool_name: str) -> Callable[[dict[str, Any]], str]:
     """Create an executor callable that delegates to the sandbox service."""
 
     endpoint = _sandbox_endpoint_for_tool(tool_name)
+    timeout = _client_timeout_for_tool(tool_name)
 
     def _execute(args: dict[str, Any]) -> str:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{endpoint}/execute/{tool_name}",
                 json={"tool_args": args},
