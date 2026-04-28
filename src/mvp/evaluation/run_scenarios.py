@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+import datetime
 
 from agent.config import PIPELINE_URL
 
@@ -44,7 +45,8 @@ BASE_URL: str = f"{_parsed.scheme}://{_parsed.netloc}"
 HEALTH_URL: str = f"{BASE_URL}/health"
 TOOLS_URL: str = f"{BASE_URL}/tools"
 
-SCENARIOS_DIR: Path = Path(__file__).resolve().parent / "json files"
+SCENARIOS_DIR: Path = Path(__file__).resolve().parent / "scenarios"
+RESULTS_DIR: Path = Path(__file__).resolve().parent / "results"
 
 # ---------------------------------------------------------------------------
 # Endpoint connections
@@ -389,5 +391,19 @@ def healthCheck():
     _log.info("=== Endpoint connections OK — ready to run scenarios ===")
 
 if __name__ == "__main__":
+    currentTime = datetime.datetime.today()
+
+    if not os.path.exists(RESULTS_DIR):
+        os.mkdir(RESULTS_DIR)
+
+    logging.basicConfig(
+        filename=RESULTS_DIR / currentTime.strftime("%Y-%m-%d_%H-%M-%S.log"),
+        filemode='w',
+        level=logging.INFO,
+        force=True
+    )
+
+    logging.info(f"Logging started at {RESULTS_DIR}")
+
     #healthCheck()
     processScenarios()
