@@ -26,12 +26,27 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
-    ports:
-      - '11434:11434'
+    # Port 11434 is NOT published to the host — all services access Ollama via
+    # container networking (ollama:11434 on control-net / egress-net).
+    # This avoids conflicts with any host-side Ollama installation (e.g. Windows).
+    # To use the CLI from the host: docker exec ollama ollama <command>
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      # Required for cloud-routed models (e.g. kimi-k2.5:cloud).
+      # Obtain or rotate keys at: https://ollama.com/settings/api-keys
+      # Set in the host shell before 'docker compose up':
+      #   export OLLAMA_API_KEY=<your-key>
+      # The SSH key that authenticates the daemon to the Ollama Cloud registry
+      # is persisted automatically in the ollama_data volume (/root/.ollama/).
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
     networks:
       - control-net
+      # egress-net: required for cloud-routed models (kimi-k2.5:cloud, etc.)
+      # The Ollama daemon makes outbound HTTPS calls to ollama.com directly.
+      # control-net is internal: true (no internet), so cloud inference
+      # requires this second attachment.
+      - egress-net
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'ollama list || exit 1']
@@ -57,17 +72,15 @@ services:
       # Ollama connection — used when REAL_TOOLS=true for the summarize tool
       - OLLAMA_HOST=http://ollama:11434
       - LLM_MODEL=qwen2.5:7b
-      - SANDBOX_TOOLS_URL=http://sandbox-tools:8001
-      - SANDBOX_LLM_URL=http://sandbox-llm:8003
+      - SANDBOX_TOOLS_URL=http://tool-runner:8001
+      - SANDBOX_LLM_URL=http://tool-runner:8001
     networks:
       - control-net
       - host-net
     depends_on:
       ollama:
         condition: service_healthy
-      sandbox-tools:
-        condition: service_healthy
-      sandbox-llm:
+      tool-runner:
         condition: service_healthy
       egress-proxy:
         condition: service_healthy
@@ -90,6 +103,7 @@ services:
   sandbox-tools:
     build: .
     container_name: agentic-security-sandbox-tools
+    runtime: runsc
     command:
       [
         'uvicorn',
@@ -133,6 +147,7 @@ services:
   sandbox-llm:
     build: .
     container_name: agentic-security-sandbox-llm
+    runtime: runsc
     command:
       [
         'uvicorn',
@@ -172,9 +187,56 @@ services:
       retries: 5
       start_period: 15s
 
+  tool-runner:
+    build: .
+    image: agentic-security-tool-image   # also used as TOOL_IMAGE_NAME for ephemeral containers
+    container_name: tool-runner
+    user: root
+    command:
+      [
+        'uvicorn',
+        'app.sandbox.service:app',
+        '--host',
+        '0.0.0.0',
+        '--port',
+        '8001',
+      ]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - REAL_TOOLS=true
+      - USE_GVISOR=true
+      - TOOL_IMAGE_NAME=agentic-security-tool-image
+      - EGRESS_NET_NAME=2026-cmpe-295a-b-agentic-security-pipeline_egress-net
+      - EGRESS_PROXY_CONTAINER=agentic-security-egress-proxy
+      # Model used by ephemeral summarize containers. Override to switch models:
+      #   kimi-k2.5:cloud  — Ollama Cloud API (requires OLLAMA_API_KEY; no local pull needed)
+      #   mistral:latest   — local inference (already pulled; fallback when no API key)
+      - LLM_MODEL=${LLM_MODEL:-kimi-k2.5:cloud}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - control-net
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'python -c "import urllib.request; urllib.request.urlopen(''http://localhost:8001/health'')" || exit 1',
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   egress-proxy:
     build: .
     container_name: agentic-security-egress-proxy
+    # No gVisor here — egress-proxy is trusted system code (a network gatekeeper),
+    # not user-submitted code. runsc breaks Docker's embedded DNS (127.0.0.11)
+    # which prevents resolving both internal service names and public hostnames.
+    # gVisor isolation belongs on the ephemeral tool containers spawned by tool-runner.
     command:
       [
         'uvicorn',
@@ -189,6 +251,11 @@ services:
     networks:
       - control-net
       - egress-net
+    secrets:
+      - ollama_token
+    environment:
+      - OLLAMA_TOKEN=${OLLAMA_TOKEN:-}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}  # Canonical key for https://ollama.com cloud models
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -210,3 +277,7 @@ services:
 
 volumes:
   ollama_data:
+
+secrets:
+  ollama_token:
+    file: ./config/dummy_ollama_token.txt

@@ -1,0 +1,34 @@
+{
+  "request_id": "cloud-test",
+  "timestamp": "2026-04-30T00:37:59.010067Z",
+  "normalized": {
+    "request_id": "cloud-test",
+    "original_content": "Summarize gVisor security.",
+    "normalized_content": "Summarize gVisor security.",
+    "normalization_notes": []
+  },
+  "risk": {
+    "request_id": "cloud-test",
+    "risk_score": 0,
+    "risk_categories": [
+      "BENIGN"
+    ],
+    "matched_signals": [],
+    "rationale": "No attack signals detected. Input appears safe."
+  },
+  "policy": {
+    "request_id": "cloud-test",
+    "policy_action": "ALLOW",
+    "policy_reason": "Risk score 0. No significant threats detected.",
+    "requires_approval": false
+  },
+  "gateway": {
+    "request_id": "cloud-test",
+    "gateway_decision": "DENIED",
+    "decision_reason": "Tool 'summarize' execution failed: Tool 'summarize' failed after 2 attempt(s): Cannot connect to Ollama at http://agentic-security-egress-proxy:8002. Ensure Ollama is running: 'ollama serve' or check OLLAMA_HOST env var.",
+    "tool_output": null
+  },
+  "sanitization_applied": false,
+  "pii_found": [],
+  "summary": "Score: 0/100 | Action: ALLOW | Gateway: DENIED"
+}

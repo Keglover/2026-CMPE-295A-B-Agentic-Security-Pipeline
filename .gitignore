@@ -17,3 +17,8 @@ Notes and Research.zip
 sandbox/
 test_payload.json
 .vscode/
+
+# gVisor setup — API key must never be committed
+gvisor/ollama.env
+
+

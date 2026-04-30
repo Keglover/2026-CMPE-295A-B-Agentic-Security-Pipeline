@@ -29,6 +29,11 @@ version: "1.0"
 tools:
   summarize:
     description: "Generate a summary of the provided text"
+    capability_tags: [llm, read]
+    cost_hint: high
+    latency_hint: slow
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
     required_args:
       - text
     optional_args: []
@@ -42,6 +47,11 @@ tools:
 
   write_note:
     description: "Write a note to the sandbox notes directory"
+    capability_tags: [filesystem, write]
+    cost_hint: low
+    latency_hint: fast
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
     required_args:
       - title
       - body
@@ -60,6 +70,11 @@ tools:
 
   search_notes:
     description: "Search notes by keyword query"
+    capability_tags: [filesystem, read]
+    cost_hint: low
+    latency_hint: fast
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
     required_args:
       - query
     optional_args: []
@@ -73,6 +88,11 @@ tools:
 
   fetch_url:
     description: "Fetch content from a URL over HTTP"
+    capability_tags: [network, retrieval]
+    cost_hint: medium
+    latency_hint: fast
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
     required_args:
       - url
     optional_args: []
@@ -92,6 +112,9 @@ tools:
 domain_allowlist:
   - "example.com"
   - "en.wikipedia.org"
+  - "ollama.ai"
+  - "api.ollama.ai"
+  - "ollama.com"          # Required for kimi-k2.5:cloud and other cloud-tagged models
   # Add approved domains here. All others are blocked.
 
 # ---------------------------------------------------------------------------
@@ -100,13 +123,13 @@ domain_allowlist:
 sandbox:
   enabled: true
   endpoints:
-    tools: "http://sandbox-tools:8001"
-    llm: "http://sandbox-llm:8003"
+    tools: "http://tool-runner:8001"
+    llm: "http://tool-runner:8001"  # Phase 3 consolidates all executors here
   tool_routes:
     fetch_url: tools
     write_note: tools
     search_notes: tools
-    summarize: llm
+    summarize: tools
 
 egress_proxy:
   endpoint: "http://egress-proxy:8002"

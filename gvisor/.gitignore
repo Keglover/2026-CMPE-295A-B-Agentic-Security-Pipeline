@@ -1,0 +1,4 @@
+# Never commit the live API key file
+ollama.env
+
+

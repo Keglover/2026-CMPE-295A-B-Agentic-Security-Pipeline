@@ -66,10 +66,10 @@ def test_sandbox_executor_raises_on_http_error(monkeypatch: pytest.MonkeyPatch) 
 
 def test_sandbox_executor_routes_llm_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeClient.next_response = _FakeResponse(200, {"output": "summary"})
-    _FakeClient.expected_url = "http://sandbox-llm:8003/execute/summarize"
+    _FakeClient.expected_url = "http://tool-runner:8001/execute/summarize"
     monkeypatch.setattr(httpx, "Client", _FakeClient)
-    monkeypatch.setenv("SANDBOX_TOOLS_URL", "http://sandbox-tools:8001")
-    monkeypatch.setenv("SANDBOX_LLM_URL", "http://sandbox-llm:8003")
+    monkeypatch.setenv("SANDBOX_TOOLS_URL", "http://tool-runner:8001")
+    monkeypatch.setenv("SANDBOX_LLM_URL", "http://tool-runner:8001")
 
     executor = build_sandbox_executor("summarize")
 

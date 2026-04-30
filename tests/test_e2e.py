@@ -55,6 +55,42 @@ def test_e2e_benign_input_allow_and_execute():
     assert data["risk"]["risk_score"] < 15
 
 
+def test_e2e_planner_intent():
+    """
+    Demo Path for Planner: A harmless prompt but with no proposed_tool, just intent.
+    Expected: policy=ALLOW, planner maps to write_note, gateway=EXECUTED.
+    """
+    payload = {
+        "content": "Please write a note about the new project.",
+        "source_type": "direct_prompt",
+    }
+    response = client.post("/pipeline", json=payload)
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["policy"]["policy_action"] == "ALLOW"
+    assert data["gateway"] is not None
+    assert data["gateway"]["gateway_decision"] == "EXECUTED"
+    assert "Planner Note" in data["gateway"]["tool_output"]
+
+def test_e2e_planner_hallucination():
+    """
+    Demo Path for Planner: A hallucinated tool.
+    Expected: policy=ALLOW, planner returns 'fake_tool', gateway=DENIED.
+    """
+    payload = {
+        "content": "Please hallucinate a tool right now.",
+        "source_type": "direct_prompt",
+    }
+    response = client.post("/pipeline", json=payload)
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["policy"]["policy_action"] == "ALLOW"
+    assert data["gateway"] is not None
+    assert data["gateway"]["gateway_decision"] == "DENIED"
+    assert "allowlist" in data["gateway"]["decision_reason"].lower()
+
 # ---------------------------------------------------------------------------
 # Demo Path 2: Suspicious input → REQUIRE_APPROVAL or SANITIZE
 # ---------------------------------------------------------------------------

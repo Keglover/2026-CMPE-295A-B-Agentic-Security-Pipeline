@@ -94,6 +94,6 @@ def build_sandbox_executor(tool_name: str) -> Callable[[dict[str, Any]], str]:
                 raise RuntimeError(str(detail))
 
             data = response.json()
-            return str(data.get("output", ""))
+            return str(data.get("result", data.get("output", "")))
 
     return _execute

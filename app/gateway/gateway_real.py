@@ -36,8 +36,11 @@ _log = logging.getLogger("gateway_real")
 # Configuration from environment
 # ---------------------------------------------------------------------------
 
-_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-_LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b")
+def _get_ollama_host() -> str:
+    return os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+def _get_llm_model() -> str:
+    return os.getenv("LLM_MODEL", "qwen2.5:7b")
 _EGRESS_PROXY_URL = os.getenv("EGRESS_PROXY_URL", "").strip() or None
 
 # Sandbox directory — /app/sandbox/notes/ in Docker, ./sandbox/notes/ locally
@@ -172,29 +175,33 @@ def _real_summarize(args: dict[str, Any]) -> str:
     )
 
     _timeout = _tool_timeout("summarize", fallback=60.0)
+    ollama_host = _get_ollama_host()
+    llm_model = _get_llm_model()
     try:
         with httpx.Client(timeout=_timeout) as client:
             resp = client.post(
-                f"{_OLLAMA_HOST}/api/generate",
+                f"{ollama_host}/api/generate",
                 json={
-                    "model": _LLM_MODEL,
+                    "model": llm_model,
                     "prompt": prompt,
                     "stream": False,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
+            if "error" in data:
+                 return f"Error from LLM: {data['error']}"
             summary = data.get("response", "").strip()
             if not summary:
                 return "Error: LLM returned an empty response."
             return summary
     except httpx.TimeoutException:
-        raise RuntimeError(f"Ollama request timed out after {_timeout:.0f}s (model: {_LLM_MODEL})")
+        raise RuntimeError(f"Ollama request timed out after {_timeout:.0f}s (model: {llm_model})")
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(f"Ollama returned HTTP {exc.response.status_code}: {exc.response.text[:200]}")
     except httpx.ConnectError:
         raise RuntimeError(
-            f"Cannot connect to Ollama at {_OLLAMA_HOST}. "
+            f"Cannot connect to Ollama at {ollama_host}. "
             f"Ensure Ollama is running: 'ollama serve' or check OLLAMA_HOST env var."
         )
 
@@ -378,11 +385,43 @@ def _real_fetch_url(args: dict[str, Any]) -> str:
     except httpx.ConnectError:
         return f"Error: could not connect to '{hostname}'."
 
-
-# Exported registry consumed by sandbox service
+# ---------------------------------------------------------------------------
+# Export executors table to match mock
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Executor registry — consumed by sandbox service (import) and CLI (__main__)
+# ---------------------------------------------------------------------------
 EXECUTORS: dict[str, Callable[[dict[str, Any]], str]] = {
     "summarize": _real_summarize,
     "write_note": _real_write_note,
     "search_notes": _real_search_notes,
     "fetch_url": _real_fetch_url,
 }
+
+
+if __name__ == "__main__":
+    import sys
+    import json
+
+    # Invocation: python -m app.gateway.gateway_real <tool_name> '<json_args>'
+    if len(sys.argv) < 3:
+        print(json.dumps({"status": "error", "error": "Usage: gateway_real.py <tool_name> '<json_args>'"}), file=sys.stderr)
+        sys.exit(1)
+
+    tool_name = sys.argv[1]
+    try:
+        args = json.loads(sys.argv[2])
+    except json.JSONDecodeError as e:
+        print(json.dumps({"status": "error", "error": f"Invalid JSON args: {e}"}), file=sys.stderr)
+        sys.exit(1)
+
+    if tool_name not in EXECUTORS:
+        print(json.dumps({"status": "error", "error": f"Unknown tool: {tool_name}"}), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        result = EXECUTORS[tool_name](args)
+        print(json.dumps({"status": "success", "output": result}))
+    except Exception as e:
+        print(json.dumps({"status": "error", "error": str(e)}), file=sys.stderr)
+        sys.exit(1)

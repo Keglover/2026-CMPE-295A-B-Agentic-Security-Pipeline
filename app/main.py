@@ -38,7 +38,11 @@ from app.models import (
     PipelineResponse,
     PolicyAction,
     PolicyResult,
+    PlannerRequest,
+    GatewayDecision,
+    GatewayResult,
 )
+from app.planner.engine import get_planner
 from app.policy import engine as policy_engine
 from app.policy.pii_detector import redact as pii_redact
 from app.risk import engine as risk_engine
@@ -49,9 +53,11 @@ from app.risk import engine as risk_engine
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="[%(asctime)s] %(levelname)s [%(name)s] %(message)s",
 )
-_log = logging.getLogger("main")
+_log = logging.getLogger(__name__)
+
+planner_engine = get_planner()
 
 # ---------------------------------------------------------------------------
 # Background tasks — approval timeout enforcement
@@ -185,6 +191,35 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
             _log.info(
                 "PII redacted request_id=%s types=%s count=%d",
                 request.request_id, pii_found, len(pii_matches),
+            )
+
+    # Stage 3c: Planner Selection (when no tool is proposed but intent might exist)
+    if not request.proposed_tool and policy.policy_action in (PolicyAction.ALLOW, PolicyAction.SANITIZE):
+        _log.info("No tool proposed; invoking Planner stage for request_id=%s", request.request_id)
+        try:
+            planner_req = PlannerRequest(
+                task_description=request.content,
+                available_tools=gateway._registry.get("tools", {}),
+                risk_score=risk.risk_score,
+                policy_action=policy.policy_action,
+                request_id=request.request_id,
+            )
+            planner_res = planner_engine.plan(planner_req)
+            if planner_res.tool_name != "unknown":
+                _log.info(
+                    "Planner suggested tool_name=%s for request_id=%s",
+                    planner_res.tool_name, request.request_id
+                )
+                request = request.model_copy(update={
+                    "proposed_tool": planner_res.tool_name,
+                    "tool_args": planner_res.tool_args,
+                })
+            else:
+                _log.info("Planner could not map task to any tool for request_id=%s", request.request_id)
+        except Exception as exc:
+            _log.error(
+                "Planner engine failed for request_id=%s: %s",
+                request.request_id, exc,
             )
 
     # Stage 4: Gateway (only when a tool call is proposed)

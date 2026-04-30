@@ -190,3 +190,24 @@ class PipelineResponse(BaseModel):
     sanitization_applied: bool = False
     pii_found: list[str] = Field(default_factory=list)
     summary: str = ""
+
+
+class PlannerRequest(BaseModel):
+    """
+    Input to the planner.
+    """
+    task_description: str
+    available_tools: dict[str, dict]  # tool_name -> metadata
+    risk_score: int
+    policy_action: PolicyAction
+    request_id: str
+
+
+class PlannerResponse(BaseModel):
+    """
+    Output from the planner.
+    """
+    tool_name: str
+    tool_args: dict[str, Any]
+    rationale: str
+    request_id: str
