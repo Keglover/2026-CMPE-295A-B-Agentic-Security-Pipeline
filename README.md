@@ -133,24 +133,66 @@ Notes:
 
 ## Recreate execution in Linux
 
-These steps reproduce the same execution model on a Linux environment.
+These steps reproduce the same execution model on a native Linux environment (Ubuntu 24.04, aarch64 or x86_64).
 
-### Prerequisites
+### Step 1: Install Docker and Compose plugin
 
-- Docker Engine with Compose plugin.
-- gVisor runsc installed and registered as a Docker runtime.
-- Optional cloud inference key for Ollama cloud models.
+```bash
+sudo apt install -y docker.io docker-compose-v2
 
-### Setup and run
+# Add your user to the docker group so you can run docker without sudo
+sudo usermod -aG docker $USER
+
+# Apply the group change in the current shell (or log out and back in)
+newgrp docker
+```
+
+### Step 2: Install gVisor (runsc)
+
+The gVisor setup scripts in the gvisor/ directory target WSL 2. For native Linux, install directly from the official release:
+
+```bash
+ARCH=$(uname -m)   # aarch64 or x86_64
+BASE_URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+
+cd /tmp
+wget -q --show-progress \
+  "${BASE_URL}/runsc" \
+  "${BASE_URL}/runsc.sha512" \
+  "${BASE_URL}/containerd-shim-runsc-v1" \
+  "${BASE_URL}/containerd-shim-runsc-v1.sha512"
+
+sha512sum -c runsc.sha512
+sha512sum -c containerd-shim-runsc-v1.sha512
+
+chmod +x runsc containerd-shim-runsc-v1
+sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+
+# Register runsc with Docker and restart the daemon
+sudo runsc install
+sudo systemctl restart docker
+```
+
+Note: the containerd-shim-runsc-v1 file bundled in the repository root is an x86_64 binary. If your host is aarch64, you must download the correct binary as shown above.
+
+### Step 3: Verify gVisor is registered
+
+```bash
+docker info | grep -A3 Runtimes
+runsc --version
+```
+
+Expected output includes `runsc` in the Runtimes list.
+
+### Step 4: Build the tool image and start the stack
 
 ```bash
 # from repository root
-
 docker build -t agentic-security-tool-image .
 USE_GVISOR=true docker compose up -d --build
 ```
 
-### Verify runtime and services
+### Step 5: Verify runtime and services
 
 ```bash
 docker info | grep -A3 Runtimes
@@ -158,11 +200,32 @@ curl -s http://localhost:8000/health | jq
 curl -s http://localhost:8000/tools | jq
 ```
 
-### Verify runsc is actually used for tool jobs
+### Step 6: Verify runsc is actually used for tool jobs
 
 ```bash
 docker compose logs --tail 120 tool-runner | grep -E "runtime=runsc|Spawning container"
 ```
+
+### Step 7: Set Ollama API key for cloud model support (optional)
+
+Cloud models such as kimi-k2.5:cloud require an API key. Pass it at egress-proxy startup:
+
+```bash
+OLLAMA_API_KEY="<your-key>" docker compose up -d --force-recreate egress-proxy
+docker exec agentic-security-egress-proxy printenv OLLAMA_API_KEY
+```
+
+Note: rebuilding with `docker compose up --build` will recreate the egress-proxy container and lose the key. Re-run the above command after any rebuild.
+
+### Troubleshooting Linux-specific issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| permission denied on docker.sock | user not in docker group | run sudo usermod -aG docker $USER then newgrp docker |
+| unknown shorthand flag -d in docker compose | Compose plugin not installed | sudo apt install docker-compose-v2 |
+| unknown runtime runsc | runsc not installed or not registered | install from storage.googleapis.com/gvisor then sudo runsc install and restart docker |
+| runsc binary wrong architecture | bundled binary is x86_64, host is aarch64 | download the correct arch binary as shown in Step 2 |
+| 401 unauthorized from cloud model | OLLAMA_API_KEY lost after rebuild | re-run OLLAMA_API_KEY=key docker compose up -d --force-recreate egress-proxy |
 
 ---
 
@@ -435,6 +498,152 @@ curl -s -X POST http://localhost:8000/pipeline \
     }
   }' | python3 -m json.tool
 ```
+
+### 2b. Oversize summarize routed to cloud model (more than 8000 chars)
+
+Input text exceeding 8000 characters triggers the cloud path via egress-proxy and requires human approval before execution.
+
+Requires `OLLAMA_API_KEY` to be set in the egress-proxy container. See Step 7 in the Linux setup section.
+
+Step 1: submit the request. Gateway queues it for approval.
+
+```bash
+python3 -c "
+import json, urllib.request
+chunk = (
+    'Large Language Models are increasingly deployed as agentic systems that can browse '
+    'the web, call third-party tools, write and execute code, manage files, and interact '
+    'with external APIs. These systems introduce novel security challenges because a single '
+    'prompt injection or policy bypass can cause the agent to exfiltrate data, execute '
+    'malicious commands, or chain tool calls in unintended ways. Traditional input '
+    'validation and output filtering are insufficient because the attack surface is dynamic: '
+    'the agent itself decides which tools to invoke and with what arguments, often based on '
+    'unstructured natural language instructions that may have been tampered with. '
+    'Policy-mediated architectures address this by interposing an enforcement layer between '
+    'the agent reasoning loop and the tool executor. Every proposed tool call is scored for '
+    'risk, checked against an allowlist, validated for argument schema conformance, and '
+    'optionally queued for human approval before any side effect occurs. '
+)
+text = chunk * 12   # ~23000 chars, well above the 8000-char local threshold
+print(f'Text length: {len(text)} chars')
+payload = json.dumps({
+    'request_id': 'cloud-oversize-001',
+    'content': 'summarize long document',
+    'proposed_tool': 'summarize',
+    'tool_args': {'text': text}
+}).encode()
+req = urllib.request.Request(
+    'http://localhost:8000/pipeline', data=payload,
+    headers={'Content-Type': 'application/json'}, method='POST'
+)
+with urllib.request.urlopen(req, timeout=30) as r:
+    print(json.dumps(json.loads(r.read()), indent=2))
+"
+```
+
+Expected first response:
+
+- gateway_decision DENIED.
+- decision_reason says input exceeded 8000 chars and request is queued.
+
+Step 2: approve the request.
+
+```bash
+curl -s -X POST http://localhost:8000/approve/cloud-oversize-001 \
+  -H "Content-Type: application/json" \
+  -d '{"approved_by":"reviewer","reason":"approved cloud summarize"}' | python3 -m json.tool
+```
+
+Step 3: replay the same request. Gateway recognises the approval and routes to cloud model.
+
+```bash
+python3 -c "
+import json, urllib.request
+chunk = (
+    'Large Language Models are increasingly deployed as agentic systems that can browse '
+    'the web, call third-party tools, write and execute code, manage files, and interact '
+    'with external APIs. These systems introduce novel security challenges because a single '
+    'prompt injection or policy bypass can cause the agent to exfiltrate data, execute '
+    'malicious commands, or chain tool calls in unintended ways. Traditional input '
+    'validation and output filtering are insufficient because the attack surface is dynamic: '
+    'the agent itself decides which tools to invoke and with what arguments, often based on '
+    'unstructured natural language instructions that may have been tampered with. '
+    'Policy-mediated architectures address this by interposing an enforcement layer between '
+    'the agent reasoning loop and the tool executor. Every proposed tool call is scored for '
+    'risk, checked against an allowlist, validated for argument schema conformance, and '
+    'optionally queued for human approval before any side effect occurs. '
+)
+text = chunk * 12
+payload = json.dumps({
+    'request_id': 'cloud-oversize-001',
+    'content': 'summarize long document',
+    'proposed_tool': 'summarize',
+    'tool_args': {'text': text}
+}).encode()
+req = urllib.request.Request(
+    'http://localhost:8000/pipeline', data=payload,
+    headers={'Content-Type': 'application/json'}, method='POST'
+)
+with urllib.request.urlopen(req, timeout=120) as r:
+    result = json.loads(r.read())
+gw = result['gateway']
+print('Decision:', gw['gateway_decision'])
+print('Output:', gw.get('tool_output'))
+"
+```
+
+Expected replay response:
+
+- gateway_decision EXECUTED.
+- tool_output contains the cloud-generated summary.
+- tool-runner logs show summarize route: cloud and the egress-proxy IP injection.
+
+### 2c. Execute command with approval gate
+
+execute_command always requires approval. This shows the full submit → approve → replay flow for "Write and execute a python program that prints the output of executing the dmesg command".
+
+Step 1: submit the request. Gateway queues it for approval.
+
+```bash
+curl -s -X POST http://localhost:8000/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "exec-dmesg-001",
+    "source_type": "direct_prompt",
+    "content": "Write and execute a python program that prints the output of executing the dmesg command"
+  }' | python3 -m json.tool
+```
+
+Expected first response:
+
+- gateway_decision DENIED.
+- decision_reason says request queued for approval.
+
+Step 2: approve the request.
+
+```bash
+curl -s -X POST http://localhost:8000/approve/exec-dmesg-001 \
+  -H "Content-Type: application/json" \
+  -d '{"approved_by":"reviewer","reason":"approved sandbox dmesg execution"}' | python3 -m json.tool
+```
+
+Step 3: replay the same request. Gateway recognises the approval and runs the command in a gVisor-sandboxed container.
+
+```bash
+curl -s -X POST http://localhost:8000/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "exec-dmesg-001",
+    "source_type": "direct_prompt",
+    "content": "Write and execute a python program that prints the output of executing the dmesg command"
+  }' | python3 -m json.tool
+```
+
+Expected replay response:
+
+- gateway_decision EXECUTED.
+- tool_output contains dmesg output from the sandboxed container.
+- tool-runner logs show runtime=runsc when USE_GVISOR=true.
 
 ### 3. PII content should sanitize then execute
 

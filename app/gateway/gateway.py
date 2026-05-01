@@ -303,21 +303,43 @@ def mediate(
         and _SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL
         and len(str(tool_args.get("text", ""))) > _SUMMARIZE_LOCAL_MAX_CHARS
     ):
-        approval_manager.submit(
-            request_id=req_id,
-            risk_score=0,
-            risk_categories=["SUMMARIZE_OVERSIZE"],
-            proposed_tool=tool_name,
-        )
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=(
-                f"Summarize input exceeded local threshold of "
-                f"{_SUMMARIZE_LOCAL_MAX_CHARS} chars and requires human approval. "
-                f"Request '{req_id}' has been queued. Use POST /approve/{req_id} to approve."
-            ),
-        )
+        approval_record = approval_manager.get_status(req_id)
+        if approval_record is None:
+            approval_manager.submit(
+                request_id=req_id,
+                risk_score=0,
+                risk_categories=["SUMMARIZE_OVERSIZE"],
+                proposed_tool=tool_name,
+            )
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Summarize input exceeded local threshold of "
+                    f"{_SUMMARIZE_LOCAL_MAX_CHARS} chars and requires human approval. "
+                    f"Request '{req_id}' has been queued. Use POST /approve/{req_id} to approve."
+                ),
+            )
+        if approval_record.status == ApprovalStatus.APPROVED:
+            _log.info("Approved oversize summarize replay request_id=%s", req_id)
+        elif approval_record.status == ApprovalStatus.PENDING:
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Summarize oversize request '{req_id}' is still pending approval. "
+                    f"Use POST /approve/{req_id} to approve."
+                ),
+            )
+        else:
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Request '{req_id}' approval status is "
+                    f"'{approval_record.status.value}', so execution is denied."
+                ),
+            )
 
     # --- All checks passed: route to executor (with timeout + retry policy) ---
     executor = _TOOL_EXECUTORS[tool_name]
