@@ -8,11 +8,14 @@ English rationale.
 Design: Rules-first for MVP (fast, deterministic, transparent).
 An ML classifier extension point is left in place for Sprint 2+.
 
-The four attack families covered:
+The four regex attack families covered:
   - INSTRUCTION_OVERRIDE  — attempts to replace the agent's system prompt
   - DATA_EXFILTRATION     — attempts to leak data out of the agent's context
   - TOOL_COERCION         — attempts to force specific tool calls
   - OBFUSCATION           — encoding tricks that hide the above
+
+Additionally, LLM_FLAGGED records a positive or fail-closed verdict from the
+optional LLM judge (matched_signals distinguish escalation vs failure).
 """
 
 from __future__ import annotations
@@ -20,23 +23,24 @@ from __future__ import annotations
 import re
 import os
 import asyncio
-import warnings
 from dataclasses import dataclass
 
 from app.models import NormalizedInput, RiskCategory, RiskResult
 
-# Configure asyncio for Windows to avoid event loop warnings
-if os.name == 'nt':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 try:
     from app.risk.llm_judge import judge
-except Exception:
+except ModuleNotFoundError:
+    # Reason: graceful degradation when LLM dependencies (openai, httpx) are
+    # not installed. Any other import failure (typo, syntax error, etc.) is
+    # a real bug and should crash loudly at startup.
     judge = None
 
+
 def _llm_judge_enabled() -> bool:
-     """Read the LLM judge toggle at call time so CLI runs can flip it safely."""
-     return os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
+    """Read the LLM judge toggle at call time so CLI runs can flip it safely."""
+    return os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
+
+
 # ---------------------------------------------------------------------------
 # Rule definition
 # ---------------------------------------------------------------------------
@@ -66,6 +70,37 @@ class Rule:
 # ---------------------------------------------------------------------------
 
 _FLAGS = re.IGNORECASE | re.DOTALL
+
+# ---------------------------------------------------------------------------
+# LLM judge policy constants
+# These define when we consult the LLM judge and how much we trust its verdict.
+# Changes here alter security behaviour — review carefully and keep in sync
+# with the thresholds in app/policy/engine.py.
+# ---------------------------------------------------------------------------
+
+# Score band in which rule-based matching is ambiguous enough to warrant a
+# second opinion from the LLM judge. Below LOW, regex is confident the input
+# is benign — skip the (paid) LLM call. At/above HIGH, regex is already
+# confident the input is hostile — also skip the call.
+JUDGE_BAND_LOW: int = 0
+JUDGE_BAND_HIGH: int = 60
+
+# Minimum confidence the judge must report before we trust its verdict
+# enough to escalate. Below this, we treat the judge as uncertain and
+# leave the rule-based score untouched.
+JUDGE_CONFIDENCE_MIN: float = 0.7
+
+# Score we promote the request to when the judge positively confirms
+# manipulation. Chosen to land in the QUARANTINE band (60-79) in
+# policy/engine.py — denied execution, flagged for review.
+JUDGE_ESCALATION_SCORE: int = 70
+
+# Fail-closed score when the judge call itself errors out.
+# Chosen to cross the BLOCK_THRESHOLD (80) in policy/engine.py so a
+# broken safety net hard-blocks the request rather than quietly allowing
+# it. Reason: "we couldn't check" is worse than "we checked and it said yes."
+JUDGE_FAILURE_SCORE: int = 80
+
 
 RULES: list[Rule] = [
     # ---------------- INSTRUCTION_OVERRIDE ----------------
@@ -198,6 +233,8 @@ def score(normalized: NormalizedInput) -> RiskResult:
 
     Rules are additive: multiple matches accumulate. Score is capped at 100.
     The highest-contribution category becomes the primary category label.
+    When the LLM judge runs in the ambiguous band, it may add LLM_FLAGGED
+    alongside regex-derived categories; see matched_signals for details.
 
     Args:
         normalized (NormalizedInput): Output from the normalize stage.
@@ -216,7 +253,7 @@ def score(normalized: NormalizedInput) -> RiskResult:
             rationale="Empty input. No risk detected.",
         )
 
-    total_score = 0
+    risk_score = 0
     matched_signals: list[str] = []
     detected_categories: dict[RiskCategory, int] = {}
 
@@ -224,39 +261,47 @@ def score(normalized: NormalizedInput) -> RiskResult:
     for rule in RULES:
         if rule.pattern.search(text):
             matched_signals.append(rule.name)
-            total_score += rule.score_contribution
+            risk_score += rule.score_contribution
             detected_categories[rule.category] = (
                 detected_categories.get(rule.category, 0) + rule.score_contribution
             )
 
-    capped = _cap_score(total_score)
+    risk_score = _cap_score(risk_score)
 
     # ---------------- LLM JUDGE (AMBIGUOUS BAND) ----------------
     judge_result = None
 
-    if _llm_judge_enabled() and judge and 15 <= capped < 60:
+    if _llm_judge_enabled() and judge and JUDGE_BAND_LOW <= risk_score < JUDGE_BAND_HIGH:
         try:
             judge_result = asyncio.run(judge(text))
 
-            if judge_result and judge_result.is_manipulation and judge_result.confidence >= 0.7:
-                capped = max(capped, 70)
+            if (
+                judge_result
+                and judge_result.is_manipulation
+                and judge_result.confidence >= JUDGE_CONFIDENCE_MIN
+            ):
+                risk_score = max(risk_score, JUDGE_ESCALATION_SCORE)
                 matched_signals.append("llm_judge_escalation")
+                # Reason: keep category ledger aligned with score so we never
+                # mislabel LLM-only signals as OBFUSCATION; distinguish via signal.
+                detected_categories[RiskCategory.LLM_FLAGGED] = (
+                    detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
+                    + JUDGE_ESCALATION_SCORE
+                )
 
         except Exception as e:
             if "Event loop is closed" not in str(e):
-                capped = max(capped, 80)
+                risk_score = max(risk_score, JUDGE_FAILURE_SCORE)
                 matched_signals.append("llm_judge_failure")
-
-    final_score = capped
+                detected_categories[RiskCategory.LLM_FLAGGED] = (
+                    detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
+                    + JUDGE_FAILURE_SCORE
+                )
 
     # ---------------- CATEGORY + RATIONALE ----------------
     if not detected_categories:
-        if final_score > 0:
-            categories = [RiskCategory.OBFUSCATION]
-            rationale = "Model-based signal detected potential risk."
-        else:
-            categories = [RiskCategory.BENIGN]
-            rationale = "No attack signals detected. Input appears safe."
+        categories = [RiskCategory.BENIGN]
+        rationale = "No attack signals detected. Input appears safe."
     else:
         categories = sorted(
             detected_categories.keys(),
@@ -276,7 +321,7 @@ def score(normalized: NormalizedInput) -> RiskResult:
 
     return RiskResult(
         request_id=normalized.request_id,
-        risk_score=final_score,
+        risk_score=risk_score,
         risk_categories=categories,
         matched_signals=matched_signals,
         rationale=rationale,
