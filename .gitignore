@@ -14,11 +14,12 @@ audit_logs/*.ndjson
 tracker/
 Notes and Research/
 Notes and Research.zip
-sandbox/
+/sandbox/
+!/app/sandbox/
 test_payload.json
 .vscode/
+scripts/README.md
+to-do.txt
 
 # gVisor setup — API key must never be committed
 gvisor/ollama.env
-
-

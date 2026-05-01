@@ -106,6 +106,12 @@ def test_load_policy_summarize_retryable_includes_timeout():
     assert any("timeout" in r.lower() for r in policy.retry.retryable)
 
 
+def test_load_policy_execute_command_timeout_and_no_retry():
+    policy = _load_policy("execute_command")
+    assert policy.timeout_sec == 30.0
+    assert policy.retry.max_attempts == 1
+
+
 # ---------------------------------------------------------------------------
 # _is_retryable helper
 # ---------------------------------------------------------------------------

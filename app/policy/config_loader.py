@@ -139,6 +139,7 @@ def load_tool_registry() -> dict[str, Any]:
                 "write_note": {"required_args": ["title", "body"], "risk_tier": "medium", "enabled": True},
                 "search_notes": {"required_args": ["query"], "risk_tier": "low", "enabled": True},
                 "fetch_url": {"required_args": ["url"], "risk_tier": "high", "enabled": True},
+                "execute_command": {"required_args": ["command"], "risk_tier": "high", "enabled": True},
             },
             "domain_allowlist": ["example.com"],
         }

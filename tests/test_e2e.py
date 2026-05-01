@@ -118,6 +118,63 @@ def test_e2e_suspicious_input_requires_approval():
     assert data["policy"]["policy_action"] in ("REQUIRE_APPROVAL", "SANITIZE", "QUARANTINE", "BLOCK")
 
 
+def test_e2e_summarize_oversize_queues_for_approval():
+    """Oversized summarize payloads should be queued for human approval by the gateway."""
+    payload = {
+        "content": "Please summarize this text.",
+        "source_type": "direct_prompt",
+        "proposed_tool": "summarize",
+        "tool_args": {"text": "A" * 9001},
+    }
+    response = client.post("/pipeline", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["gateway"]["gateway_decision"] == "DENIED"
+    assert "queued" in data["gateway"]["decision_reason"].lower()
+    assert "requires human approval" in data["gateway"]["decision_reason"].lower()
+
+
+def test_e2e_execute_command_queues_for_approval():
+    payload = {
+        "request_id": "e2e-exec-queue-1",
+        "content": "Write and execute a python program that prints the output of executing the dmesg command",
+        "source_type": "direct_prompt",
+    }
+    response = client.post("/pipeline", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["gateway"] is not None
+    assert data["gateway"]["gateway_decision"] == "DENIED"
+    assert "approval" in data["gateway"]["decision_reason"].lower()
+
+
+def test_e2e_execute_command_approved_replay_executes_with_output():
+    payload = {
+        "request_id": "e2e-exec-replay-1",
+        "content": "Write and execute a python program that prints the output of executing the dmesg command",
+        "source_type": "direct_prompt",
+    }
+
+    first = client.post("/pipeline", json=payload)
+    assert first.status_code == 200
+    first_data = first.json()
+    assert first_data["gateway"]["gateway_decision"] == "DENIED"
+
+    approval = client.post("/approve/e2e-exec-replay-1", json={"approved_by": "pytest"})
+    assert approval.status_code == 200
+    assert approval.json()["status"] == "approved"
+
+    replay = client.post("/pipeline", json=payload)
+    assert replay.status_code == 200
+    replay_data = replay.json()
+    assert replay_data["gateway"]["gateway_decision"] == "EXECUTED"
+    assert replay_data["gateway"]["tool_output"]
+
+
 # ---------------------------------------------------------------------------
 # Demo Path 3: Malicious injection → BLOCK or QUARANTINE
 # ---------------------------------------------------------------------------

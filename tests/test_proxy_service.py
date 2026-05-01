@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,23 +27,127 @@ def test_proxy_blocks_non_allowlisted_domain() -> None:
     assert response.status_code == 400
     assert "allowlist" in response.json()["detail"].lower()
 
-def test_api_generate_blocks_unauthorized_ollama_cloud_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(proxy_service, "_OLLAMA_CLOUD_URL", "https://unauthorized-ollama.com")
-    response = client.post("/api/generate", json={"model": "qwen2.5"})
+def test_api_generate_cloud_includes_authorization_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
 
-    assert response.status_code == 403
-    assert "allowlist" in response.json()["detail"].lower()
+    class _FakeResponse:
+        def __init__(self, content: bytes) -> None:
+            self.content = content
 
-def test_api_generate_allows_authorized_ollama_cloud_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(proxy_service, "_OLLAMA_CLOUD_URL", "https://api.ollama.ai")
+        def raise_for_status(self) -> None:
+            return None
 
-    # We expect a 500 or httpx.ConnectError because it correctly attempts to route out.
-    # The important part is it DOES NOT get a 403
-    try:
-        response = client.post("/api/generate", json={"model": "qwen2.5"})
-        assert response.status_code != 403
-    except Exception:
-        pass
+    class _FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, content: bytes, headers: dict[str, str]):
+            calls.append({"url": url, "content": content, "headers": dict(headers)})
+            return _FakeResponse(b'{"response":"ok"}')
+
+    monkeypatch.setattr(proxy_service, "_OLLAMA_CLOUD_URL", "https://api.ollama.com")
+    monkeypatch.setattr(proxy_service, "_OLLAMA_API_KEY", "test-key")
+    monkeypatch.setattr(proxy_service.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = client.post(
+        "/api/generate",
+        json={"model": "kimi-k2.5:cloud", "prompt": "hello", "stream": False},
+    )
+
+    assert response.status_code == 200
+    assert calls
+    assert calls[0]["url"] == "https://api.ollama.com/api/generate"
+    assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_api_generate_cloud_without_key_omits_authorization_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeResponse:
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, content: bytes, headers: dict[str, str]):
+            calls.append({"url": url, "content": content, "headers": dict(headers)})
+            return _FakeResponse(b'{"response":"ok"}')
+
+    monkeypatch.setattr(proxy_service, "_OLLAMA_CLOUD_URL", "https://api.ollama.com")
+    monkeypatch.setattr(proxy_service, "_OLLAMA_API_KEY", "")
+    monkeypatch.setattr(proxy_service.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = client.post(
+        "/api/generate",
+        json={"model": "kimi-k2.5:cloud", "prompt": "hello", "stream": False},
+    )
+
+    assert response.status_code == 200
+    assert calls
+    assert calls[0]["url"] == "https://api.ollama.com/api/generate"
+    assert "Authorization" not in calls[0]["headers"]
+
+
+def test_api_generate_local_model_uses_local_url_no_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeResponse:
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, content: bytes, headers: dict[str, str]):
+            calls.append({"url": url, "content": content, "headers": dict(headers)})
+            return _FakeResponse(b'{"response":"ok"}')
+
+    monkeypatch.setattr(proxy_service, "_OLLAMA_LOCAL_URL", "http://ollama:11434")
+    monkeypatch.setattr(proxy_service, "_OLLAMA_API_KEY", "test-key")
+    monkeypatch.setattr(proxy_service.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = client.post(
+        "/api/generate",
+        json={"model": "mistral:latest", "prompt": "hello", "stream": False},
+    )
+
+    assert response.status_code == 200
+    assert calls
+    assert calls[0]["url"] == "http://ollama:11434/api/generate"
+    assert "Authorization" not in calls[0]["headers"]
 
 
 def test_fetch_remote_text_truncates_large_responses(monkeypatch: pytest.MonkeyPatch) -> None:

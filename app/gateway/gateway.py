@@ -28,7 +28,7 @@ import logging as _logging
 import os
 from typing import Any
 
-from app.approval.workflow import approval_manager
+from app.approval.workflow import ApprovalStatus, approval_manager
 from app.gateway.circuit_breaker import circuit_registry
 from app.gateway.executor_policy import run_with_policy
 from app.models import (
@@ -69,12 +69,39 @@ DOMAIN_ALLOWLIST: list[str] = _registry.get("domain_allowlist", ["example.com"])
 
 REGISTRY_VERSION: str = str(_registry.get("version", "unknown"))
 
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+_summarize_cfg: dict[str, Any] = _sandbox_config.get("summarize", {})
+_SUMMARIZE_LOCAL_MAX_CHARS: int = _safe_int(
+    os.getenv(
+        "SUMMARIZE_LOCAL_MAX_CHARS",
+        _summarize_cfg.get("local_max_chars", 8000),
+    ),
+    8000,
+)
+_SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL: bool = str(
+    _summarize_cfg.get("require_approval_above_local_max", True)
+).strip().lower() in {"1", "true", "yes", "on"}
+
+_EXECUTE_COMMAND_ALWAYS_REQUIRES_APPROVAL: bool = True
+
 # Policy actions that permit execution
 EXECUTABLE_ACTIONS: set[PolicyAction] = {PolicyAction.ALLOW, PolicyAction.SANITIZE}
 
 _log.info(
     "Tool registry loaded (v%s): %s",
     REGISTRY_VERSION, sorted(TOOL_ALLOWLIST),
+)
+_log.info(
+    "Summarize local_max_chars=%d oversize_requires_approval=%s",
+    _SUMMARIZE_LOCAL_MAX_CHARS,
+    _SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL,
 )
 
 # ---------------------------------------------------------------------------
@@ -148,28 +175,92 @@ def mediate(
     if policy.policy_action not in EXECUTABLE_ACTIONS:
         # If REQUIRE_APPROVAL, submit to approval queue instead of flat deny
         if policy.policy_action == PolicyAction.REQUIRE_APPROVAL:
+            approval_record = approval_manager.get_status(req_id)
+            if approval_record is None:
+                approval_manager.submit(
+                    request_id=req_id,
+                    risk_score=0,  # actual score is in policy_reason text
+                    risk_categories=[],
+                    proposed_tool=tool_name,
+                )
+                return GatewayResult(
+                    request_id=req_id,
+                    gateway_decision=GatewayDecision.DENIED,
+                    decision_reason=(
+                        f"Awaiting human approval. Request '{req_id}' has been "
+                        f"queued. Use POST /approve/{req_id} to approve."
+                    ),
+                )
+
+            if approval_record.status == ApprovalStatus.APPROVED:
+                _log.info("Approved replay request_id=%s tool=%s", req_id, tool_name)
+            elif approval_record.status == ApprovalStatus.PENDING:
+                return GatewayResult(
+                    request_id=req_id,
+                    gateway_decision=GatewayDecision.DENIED,
+                    decision_reason=(
+                        f"Awaiting human approval. Request '{req_id}' is still pending. "
+                        f"Use POST /approve/{req_id} to approve."
+                    ),
+                )
+            else:
+                return GatewayResult(
+                    request_id=req_id,
+                    gateway_decision=GatewayDecision.DENIED,
+                    decision_reason=(
+                        f"Request '{req_id}' approval status is "
+                        f"'{approval_record.status.value}', so execution is denied."
+                    ),
+                )
+        else:
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Policy action '{policy.policy_action.value}' does not permit "
+                    f"tool execution. Reason: {policy.policy_reason}"
+                ),
+            )
+
+    # --- execute_command: always require explicit human approval ---
+    if tool_name == "execute_command" and _EXECUTE_COMMAND_ALWAYS_REQUIRES_APPROVAL:
+        approval_record = approval_manager.get_status(req_id)
+        if approval_record is None:
             approval_manager.submit(
                 request_id=req_id,
-                risk_score=0,  # actual score is in policy_reason text
-                risk_categories=[],
+                risk_score=0,
+                risk_categories=["EXECUTE_COMMAND"],
                 proposed_tool=tool_name,
             )
             return GatewayResult(
                 request_id=req_id,
                 gateway_decision=GatewayDecision.DENIED,
                 decision_reason=(
-                    f"Awaiting human approval. Request '{req_id}' has been "
-                    f"queued. Use POST /approve/{req_id} to approve."
+                    f"Command execution always requires human approval. "
+                    f"Request '{req_id}' has been queued. Use POST /approve/{req_id} to approve."
                 ),
             )
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=(
-                f"Policy action '{policy.policy_action.value}' does not permit "
-                f"tool execution. Reason: {policy.policy_reason}"
-            ),
-        )
+
+        if approval_record.status == ApprovalStatus.APPROVED:
+            _log.info("execute_command approved request_id=%s", req_id)
+        elif approval_record.status == ApprovalStatus.PENDING:
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Awaiting human approval. Request '{req_id}' is still pending. "
+                    f"Use POST /approve/{req_id} to approve."
+                ),
+            )
+        else:
+            return GatewayResult(
+                request_id=req_id,
+                gateway_decision=GatewayDecision.DENIED,
+                decision_reason=(
+                    f"Request '{req_id}' approval status is "
+                    f"'{approval_record.status.value}'."
+                ),
+            )
 
     # --- Rate limit check (Task 3.20) ---
     if not rate_limiter.check(tool_name, agent_id=agent_id):
@@ -203,6 +294,28 @@ def mediate(
             gateway_decision=GatewayDecision.DENIED,
             decision_reason=(
                 f"Tool '{tool_name}' is missing required argument(s): {missing}."
+            ),
+        )
+
+    # --- Summarize oversize guard: queue for human approval before cloud path ---
+    if (
+        tool_name == "summarize"
+        and _SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL
+        and len(str(tool_args.get("text", ""))) > _SUMMARIZE_LOCAL_MAX_CHARS
+    ):
+        approval_manager.submit(
+            request_id=req_id,
+            risk_score=0,
+            risk_categories=["SUMMARIZE_OVERSIZE"],
+            proposed_tool=tool_name,
+        )
+        return GatewayResult(
+            request_id=req_id,
+            gateway_decision=GatewayDecision.DENIED,
+            decision_reason=(
+                f"Summarize input exceeded local threshold of "
+                f"{_SUMMARIZE_LOCAL_MAX_CHARS} chars and requires human approval. "
+                f"Request '{req_id}' has been queued. Use POST /approve/{req_id} to approve."
             ),
         )
 

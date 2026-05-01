@@ -72,6 +72,13 @@ services:
       # Ollama connection — used when REAL_TOOLS=true for the summarize tool
       - OLLAMA_HOST=http://ollama:11434
       - LLM_MODEL=qwen2.5:7b
+      # Planner execute-command synthesis prefers cloud via egress-proxy,
+      # then falls back to local Ollama if cloud is unavailable.
+      - PLANNER_OLLAMA_CLOUD_HOST=http://egress-proxy:8002
+      - PLANNER_LLM_MODEL_CLOUD=${LLM_MODEL_CLOUD:-kimi-k2.5:cloud}
+      - PLANNER_OLLAMA_LOCAL_HOST=http://ollama:11434
+      - PLANNER_LLM_MODEL_LOCAL=${LLM_MODEL_LOCAL:-qwen2.5:7b}
+      - PLANNER_LLM_TIMEOUT_SEC=8
       - SANDBOX_TOOLS_URL=http://tool-runner:8001
       - SANDBOX_LLM_URL=http://tool-runner:8001
     networks:
@@ -207,7 +214,12 @@ services:
       - USE_GVISOR=true
       - TOOL_IMAGE_NAME=agentic-security-tool-image
       - EGRESS_NET_NAME=2026-cmpe-295a-b-agentic-security-pipeline_egress-net
+      - CONTROL_NET_NAME=2026-cmpe-295a-b-agentic-security-pipeline_control-net
       - EGRESS_PROXY_CONTAINER=agentic-security-egress-proxy
+      - OLLAMA_CONTAINER=ollama
+      - SUMMARIZE_LOCAL_MAX_CHARS=${SUMMARIZE_LOCAL_MAX_CHARS:-8000}
+      - LLM_MODEL_LOCAL=${LLM_MODEL_LOCAL:-qwen2.5:7b}
+      - LLM_MODEL_CLOUD=${LLM_MODEL_CLOUD:-kimi-k2.5:cloud}
       # Model used by ephemeral summarize containers. Override to switch models:
       #   kimi-k2.5:cloud  — Ollama Cloud API (requires OLLAMA_API_KEY; no local pull needed)
       #   mistral:latest   — local inference (already pulled; fallback when no API key)

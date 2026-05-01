@@ -11,6 +11,8 @@ Covers:
 
 import pytest
 
+from app.approval.workflow import approval_manager
+from app.gateway import gateway
 from app.gateway.gateway import mediate
 from app.models import (
     GatewayDecision,
@@ -20,6 +22,14 @@ from app.models import (
     RiskCategory,
     SourceType,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_state() -> None:
+    """Prevent cross-test leakage from approval and rate limiter state."""
+    approval_manager._pending.clear()
+    approval_manager._resolved.clear()
+    gateway.rate_limiter._buckets.clear()
 
 
 def _policy(action: PolicyAction, req_id: str = "gw-test") -> PolicyResult:
@@ -156,3 +166,52 @@ def test_rate_limit_isolated_by_agent():
     assert denied.gateway_decision == GatewayDecision.DENIED
     assert "agent-a" in denied.decision_reason
     assert allowed_b.gateway_decision == GatewayDecision.EXECUTED
+
+
+def test_summarize_oversize_requires_approval(monkeypatch: pytest.MonkeyPatch):
+    """Oversized summarize requests should be queued for approval even with ALLOW policy."""
+    monkeypatch.setattr(gateway, "_SUMMARIZE_LOCAL_MAX_CHARS", 5)
+    monkeypatch.setattr(gateway, "_SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL", True)
+
+    req = _request("summarize", {"text": "this exceeds threshold"}, req_id="gw-over-1")
+    result = mediate(req, _policy(PolicyAction.ALLOW, req_id="gw-over-1"))
+
+    assert result.gateway_decision == GatewayDecision.DENIED
+    assert "queued" in result.decision_reason.lower()
+    assert "requires human approval" in result.decision_reason.lower()
+
+
+def test_summarize_oversize_gate_can_be_disabled(monkeypatch: pytest.MonkeyPatch):
+    """When disabled by config, oversize summarize requests should execute normally."""
+    monkeypatch.setattr(gateway, "_SUMMARIZE_LOCAL_MAX_CHARS", 5)
+    monkeypatch.setattr(gateway, "_SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL", False)
+
+    req = _request("summarize", {"text": "this exceeds threshold"}, req_id="gw-over-2")
+    result = mediate(req, _policy(PolicyAction.ALLOW, req_id="gw-over-2"))
+
+    assert result.gateway_decision == GatewayDecision.EXECUTED
+
+
+def test_execute_command_always_requires_approval_first_pass():
+    """execute_command should queue even when policy is ALLOW."""
+    req = _request("execute_command", {"command": "echo hello"}, req_id="gw-exec-1")
+    result = mediate(req, _policy(PolicyAction.ALLOW, req_id="gw-exec-1"))
+
+    assert result.gateway_decision == GatewayDecision.DENIED
+    assert "requires human approval" in result.decision_reason.lower()
+    assert "queued" in result.decision_reason.lower()
+
+
+def test_execute_command_executes_after_approval_replay():
+    """Replaying an approved request_id should execute the command tool."""
+    req = _request("execute_command", {"command": "echo hello"}, req_id="gw-exec-2")
+
+    first = mediate(req, _policy(PolicyAction.ALLOW, req_id="gw-exec-2"))
+    assert first.gateway_decision == GatewayDecision.DENIED
+
+    approval = approval_manager.approve("gw-exec-2", approved_by="tester")
+    assert approval is not None
+
+    replay = mediate(req, _policy(PolicyAction.ALLOW, req_id="gw-exec-2"))
+    assert replay.gateway_decision == GatewayDecision.EXECUTED
+    assert replay.tool_output is not None

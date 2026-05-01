@@ -13,6 +13,7 @@ Executor implementations:
   - write_note:    Writes markdown files to a sandboxed directory
   - search_notes:  Searches note files in the sandboxed directory
   - fetch_url:     HTTP fetch with domain allowlist and SSRF protection
+    - execute_command: Runs a shell command inside the sandbox container
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import ipaddress
 import logging
 import os
 import re
+import subprocess
 from html import unescape
 from html.parser import HTMLParser
 from io import StringIO
@@ -48,6 +50,7 @@ _SANDBOX_DIR = Path(os.getenv("SANDBOX_DIR", "/app/sandbox/notes"))
 
 # Domain allowlist — loaded from gateway.py at import time; fallback here
 _DOMAIN_ALLOWLIST: set[str] | None = None
+_COMMAND_OUTPUT_MAX_CHARS = 12000
 
 
 def _tool_timeout(tool_name: str, fallback: float) -> float:
@@ -121,6 +124,13 @@ def _normalize_text_response(text: str) -> str:
     if len(text) > 5000:
         text = text[:5000] + "... [truncated]"
     return text
+
+
+def _truncate_command_output(text: str) -> str:
+    """Cap command output for safe response size."""
+    if len(text) <= _COMMAND_OUTPUT_MAX_CHARS:
+        return text
+    return text[:_COMMAND_OUTPUT_MAX_CHARS] + "\n... [truncated]"
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +395,64 @@ def _real_fetch_url(args: dict[str, Any]) -> str:
     except httpx.ConnectError:
         return f"Error: could not connect to '{hostname}'."
 
+
+# ---------------------------------------------------------------------------
+# Real executor: execute_command inside sandboxed container runtime
+# ---------------------------------------------------------------------------
+
+
+def _real_execute_command(args: dict[str, Any]) -> str:
+    """
+    Execute a shell command and return combined output.
+
+    This executor runs only inside the tool-runner's ephemeral sandbox container
+    when REAL_TOOLS=true. It preserves output (stdout/stderr) for user visibility
+    while keeping execution bounded by timeout and output limits.
+    """
+    command = str(args.get("command", "")).strip()
+    if not command:
+        return "Error: 'command' is required and cannot be empty."
+
+    policy_timeout = _tool_timeout("execute_command", fallback=30.0)
+    requested_timeout = args.get("timeout_sec", policy_timeout)
+    try:
+        timeout_sec = float(requested_timeout)
+    except (TypeError, ValueError):
+        timeout_sec = policy_timeout
+    timeout_sec = max(1.0, min(timeout_sec, policy_timeout))
+
+    working_dir = str(args.get("working_dir", "/app")).strip() or "/app"
+    if not (working_dir.startswith("/app") or working_dir.startswith("/tmp/job")):
+        return "Error: 'working_dir' must stay within /app or /tmp/job."
+
+    try:
+        completed = subprocess.run(
+            ["sh", "-lc", command],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            cwd=working_dir,
+        )
+    except FileNotFoundError as exc:
+        return f"Error: command runtime not found: {exc}"
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {timeout_sec:.0f}s."
+    except Exception as exc:
+        return f"Error: command execution failed: {exc}"
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+
+    sections = [f"$ {command}", f"exit_code={completed.returncode}"]
+    if stdout:
+        sections.append("stdout:\n" + stdout)
+    if stderr:
+        sections.append("stderr:\n" + stderr)
+    if not stdout and not stderr:
+        sections.append("(no output)")
+
+    return _truncate_command_output("\n".join(sections))
+
 # ---------------------------------------------------------------------------
 # Export executors table to match mock
 # ---------------------------------------------------------------------------
@@ -396,6 +464,7 @@ EXECUTORS: dict[str, Callable[[dict[str, Any]], str]] = {
     "write_note": _real_write_note,
     "search_notes": _real_search_notes,
     "fetch_url": _real_fetch_url,
+    "execute_command": _real_execute_command,
 }
 
 
@@ -403,25 +472,43 @@ if __name__ == "__main__":
     import sys
     import json
 
+    result_prefix = "GATEWAY_REAL_RESULT="
+    error_prefix = "GATEWAY_REAL_ERROR="
+
     # Invocation: python -m app.gateway.gateway_real <tool_name> '<json_args>'
     if len(sys.argv) < 3:
-        print(json.dumps({"status": "error", "error": "Usage: gateway_real.py <tool_name> '<json_args>'"}), file=sys.stderr)
+        print(
+            error_prefix
+            + json.dumps(
+                {
+                    "status": "error",
+                    "error": "Usage: gateway_real.py <tool_name> '<json_args>'",
+                }
+            ),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     tool_name = sys.argv[1]
     try:
         args = json.loads(sys.argv[2])
     except json.JSONDecodeError as e:
-        print(json.dumps({"status": "error", "error": f"Invalid JSON args: {e}"}), file=sys.stderr)
+        print(
+            error_prefix + json.dumps({"status": "error", "error": f"Invalid JSON args: {e}"}),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if tool_name not in EXECUTORS:
-        print(json.dumps({"status": "error", "error": f"Unknown tool: {tool_name}"}), file=sys.stderr)
+        print(
+            error_prefix + json.dumps({"status": "error", "error": f"Unknown tool: {tool_name}"}),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
         result = EXECUTORS[tool_name](args)
-        print(json.dumps({"status": "success", "output": result}))
+        print(result_prefix + json.dumps({"status": "success", "output": result}))
     except Exception as e:
-        print(json.dumps({"status": "error", "error": str(e)}), file=sys.stderr)
+        print(error_prefix + json.dumps({"status": "error", "error": str(e)}), file=sys.stderr)
         sys.exit(1)

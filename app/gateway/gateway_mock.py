@@ -70,10 +70,27 @@ def _mock_fetch_url(args: dict[str, Any]) -> str:
     return f"[MOCK] Content from '{url}': <p>Example page content (simulated).</p>"
 
 
+def _mock_execute_command(args: dict[str, Any]) -> str:
+    """
+    Simulate command execution without running any real command.
+
+    Args:
+        args (dict): Must contain 'command' (str).
+
+    Returns:
+        str: Simulated command output.
+    """
+    command = str(args.get("command", "")).strip()
+    if not command:
+        return "[MOCK] Missing command argument."
+    return f"[MOCK] Executed command in sandbox simulation: {command}"
+
+
 # Exported registry consumed by gateway.py
 EXECUTORS: dict[str, Callable[[dict[str, Any]], str]] = {
     "summarize": _mock_summarize,
     "write_note": _mock_write_note,
     "search_notes": _mock_search_notes,
     "fetch_url": _mock_fetch_url,
+    "execute_command": _mock_execute_command,
 }
