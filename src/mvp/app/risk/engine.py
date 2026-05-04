@@ -20,9 +20,10 @@ optional LLM judge (matched_signals distinguish escalation vs failure).
 
 from __future__ import annotations
 
-import re
-import os
 import asyncio
+import concurrent.futures
+import os
+import re
 from dataclasses import dataclass
 
 from app.models import NormalizedInput, RiskCategory, RiskResult
@@ -220,21 +221,198 @@ RULES: list[Rule] = [
          RiskCategory.OBFUSCATION, 25),
 ]
 
-# Scoring
+# ---------------------------------------------------------------------------
+# Scoring helpers — each does one thing and is independently testable
+# ---------------------------------------------------------------------------
+
 
 def _cap_score(raw: int) -> int:
     """Clamp score to the 0-100 range."""
     return max(0, min(100, raw))
 
 
+def _match_rules(text: str) -> tuple[int, list[str], dict[RiskCategory, int]]:
+    """
+    Run all regex rules against text and accumulate score and category weights.
+
+    Args:
+        text (str): Normalized input to scan.
+
+    Returns:
+        tuple: (capped risk_score, matched_signals list, detected_categories dict)
+    """
+    risk_score = 0
+    matched_signals: list[str] = []
+    detected_categories: dict[RiskCategory, int] = {}
+
+    for rule in RULES:
+        if rule.pattern.search(text):
+            matched_signals.append(rule.name)
+            risk_score += rule.score_contribution
+            detected_categories[rule.category] = (
+                detected_categories.get(rule.category, 0) + rule.score_contribution
+            )
+
+    return _cap_score(risk_score), matched_signals, detected_categories
+
+
+def _run_judge_safely(coro) -> object:
+    """
+    Run an async coroutine safely regardless of whether an event loop is
+    already running in the calling thread.
+
+    When called from a sync context (normal FastAPI `def` route, CLI) there
+    is no running loop, so asyncio.run() creates a fresh one as usual.
+
+    When called from an async context (async route, pytest-asyncio) asyncio.run()
+    would raise RuntimeError. Instead we submit the coroutine to a one-shot
+    thread that gets its own event loop, avoiding any conflict.
+
+    Args:
+        coro: An awaitable coroutine (e.g. judge(text)).
+
+    Returns:
+        Whatever the coroutine returns.
+    """
+    try:
+        asyncio.get_running_loop()
+        # A loop is already running — use a dedicated thread.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        # No running loop — asyncio.run() is safe.
+        return asyncio.run(coro)
+
+
+def _apply_judge(
+    text: str,
+    risk_score: int,
+    matched_signals: list[str],
+    detected_categories: dict[RiskCategory, int],
+) -> tuple[int, list[str], dict[RiskCategory, int], object]:
+    """
+    Optionally invoke the LLM judge when the score is in the ambiguous band.
+
+    Mutates copies of matched_signals and detected_categories (passed by ref).
+    On judge confirmation, promotes risk_score and records LLM_FLAGGED.
+    On any judge failure, fails closed at JUDGE_FAILURE_SCORE.
+
+    Args:
+        text (str): Normalized input text.
+        risk_score (int): Score after regex matching.
+        matched_signals (list[str]): Accumulated signal names (mutated).
+        detected_categories (dict): Category weight ledger (mutated).
+
+    Returns:
+        tuple: (updated risk_score, matched_signals, detected_categories, judge_result)
+    """
+    judge_result = None
+
+    if not (_llm_judge_enabled() and judge and JUDGE_BAND_LOW <= risk_score < JUDGE_BAND_HIGH):
+        return risk_score, matched_signals, detected_categories, judge_result
+
+    try:
+        # Pass judge(text) as the coroutine so monkeypatching `judge` in tests
+        # is reflected here without a separate global lookup.
+        judge_result = _run_judge_safely(judge(text))
+
+        if (
+            judge_result
+            and judge_result.is_manipulation
+            and judge_result.confidence >= JUDGE_CONFIDENCE_MIN
+        ):
+            risk_score = max(risk_score, JUDGE_ESCALATION_SCORE)
+            matched_signals.append("llm_judge_escalation")
+            # Reason: keep category ledger aligned with score so audit tooling
+            # can filter by category without also reading matched_signals.
+            detected_categories[RiskCategory.LLM_FLAGGED] = (
+                detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
+                + JUDGE_ESCALATION_SCORE
+            )
+
+    except Exception:
+        # Any judge error (network, API, crash) → fail closed. The "Event loop
+        # is closed" string filter from the original code is no longer needed
+        # because _run_judge_safely handles the event-loop conflict explicitly.
+        risk_score = max(risk_score, JUDGE_FAILURE_SCORE)
+        matched_signals.append("llm_judge_failure")
+        detected_categories[RiskCategory.LLM_FLAGGED] = (
+            detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
+            + JUDGE_FAILURE_SCORE
+        )
+
+    return risk_score, matched_signals, detected_categories, judge_result
+
+
+def _build_result(
+    request_id: str,
+    risk_score: int,
+    matched_signals: list[str],
+    detected_categories: dict[RiskCategory, int],
+    judge_result: object,
+) -> RiskResult:
+    """
+    Assemble the final RiskResult from scored state.
+
+    Args:
+        request_id (str): Forwarded from the original request.
+        risk_score (int): Final capped risk score.
+        matched_signals (list[str]): All fired signal names.
+        detected_categories (dict): Category weight ledger.
+        judge_result: JudgeResult or None.
+
+    Returns:
+        RiskResult: Structured risk assessment.
+    """
+    if not detected_categories:
+        categories: list[RiskCategory] = [RiskCategory.BENIGN]
+        rationale = "No attack signals detected. Input appears safe."
+    else:
+        categories = sorted(
+            detected_categories.keys(),
+            key=lambda c: detected_categories[c],
+            reverse=True,
+        )
+        rationale = (
+            f"Detected {len(matched_signals)} signal(s). "
+            f"Primary threat category: {categories[0].value}. "
+            f"Matched: {', '.join(matched_signals)}."
+        )
+
+    if judge_result:
+        rationale += (
+            f" LLM judge: {judge_result.reasoning} (conf={judge_result.confidence})."
+        )
+
+    return RiskResult(
+        request_id=request_id,
+        risk_score=risk_score,
+        risk_categories=categories,
+        matched_signals=matched_signals,
+        rationale=rationale,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
 def score(normalized: NormalizedInput) -> RiskResult:
     """
-    Run all rules against the normalized content and produce a risk result.
+    Run the full risk assessment pipeline on normalized text.
 
-    Rules are additive: multiple matches accumulate. Score is capped at 100.
-    The highest-contribution category becomes the primary category label.
-    When the LLM judge runs in the ambiguous band, it may add LLM_FLAGGED
-    alongside regex-derived categories; see matched_signals for details.
+    Stages:
+      1. Early-exit for empty input.
+      2. _match_rules   — regex pass over all 26 rules.
+      3. _apply_judge   — optional LLM second opinion in the ambiguous band.
+      4. _build_result  — assemble categories, rationale, and RiskResult.
+
+    Score is additive and capped at 100. The highest-weight category becomes
+    the primary label. When the LLM judge runs it may add LLM_FLAGGED alongside
+    regex-derived categories; use matched_signals to distinguish escalation
+    (llm_judge_escalation) from a fail-closed infrastructure error
+    (llm_judge_failure).
 
     Args:
         normalized (NormalizedInput): Output from the normalize stage.
@@ -253,76 +431,10 @@ def score(normalized: NormalizedInput) -> RiskResult:
             rationale="Empty input. No risk detected.",
         )
 
-    risk_score = 0
-    matched_signals: list[str] = []
-    detected_categories: dict[RiskCategory, int] = {}
-
-    # ---------------- RULE MATCHING ----------------
-    for rule in RULES:
-        if rule.pattern.search(text):
-            matched_signals.append(rule.name)
-            risk_score += rule.score_contribution
-            detected_categories[rule.category] = (
-                detected_categories.get(rule.category, 0) + rule.score_contribution
-            )
-
-    risk_score = _cap_score(risk_score)
-
-    # ---------------- LLM JUDGE (AMBIGUOUS BAND) ----------------
-    judge_result = None
-
-    if _llm_judge_enabled() and judge and JUDGE_BAND_LOW <= risk_score < JUDGE_BAND_HIGH:
-        try:
-            judge_result = asyncio.run(judge(text))
-
-            if (
-                judge_result
-                and judge_result.is_manipulation
-                and judge_result.confidence >= JUDGE_CONFIDENCE_MIN
-            ):
-                risk_score = max(risk_score, JUDGE_ESCALATION_SCORE)
-                matched_signals.append("llm_judge_escalation")
-                # Reason: keep category ledger aligned with score so we never
-                # mislabel LLM-only signals as OBFUSCATION; distinguish via signal.
-                detected_categories[RiskCategory.LLM_FLAGGED] = (
-                    detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
-                    + JUDGE_ESCALATION_SCORE
-                )
-
-        except Exception as e:
-            if "Event loop is closed" not in str(e):
-                risk_score = max(risk_score, JUDGE_FAILURE_SCORE)
-                matched_signals.append("llm_judge_failure")
-                detected_categories[RiskCategory.LLM_FLAGGED] = (
-                    detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
-                    + JUDGE_FAILURE_SCORE
-                )
-
-    # ---------------- CATEGORY + RATIONALE ----------------
-    if not detected_categories:
-        categories = [RiskCategory.BENIGN]
-        rationale = "No attack signals detected. Input appears safe."
-    else:
-        categories = sorted(
-            detected_categories.keys(),
-            key=lambda c: detected_categories[c],
-            reverse=True,
-        )
-
-        rationale = (
-            f"Detected {len(matched_signals)} signal(s). "
-            f"Primary threat category: {categories[0].value}. "
-            f"Matched: {', '.join(matched_signals)}."
-        )
-
-    # Add judge reasoning
-    if judge_result:
-        rationale += f" LLM judge: {judge_result.reasoning} (conf={judge_result.confidence})."
-
-    return RiskResult(
-        request_id=normalized.request_id,
-        risk_score=risk_score,
-        risk_categories=categories,
-        matched_signals=matched_signals,
-        rationale=rationale,
+    risk_score, matched_signals, detected_categories = _match_rules(text)
+    risk_score, matched_signals, detected_categories, judge_result = _apply_judge(
+        text, risk_score, matched_signals, detected_categories
+    )
+    return _build_result(
+        normalized.request_id, risk_score, matched_signals, detected_categories, judge_result
     )
