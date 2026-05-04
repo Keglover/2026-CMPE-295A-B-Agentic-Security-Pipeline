@@ -114,7 +114,7 @@ your machine, but that is fine for this MVP since all tools are mock stubs.
 **Step 1 — Navigate to the mvp folder**
 
 ```bash
-cd "/Users/haroon/AgenticSystems/Agentic security/Agentic Security Piepline /mvp"
+cd "/CMPE-295-Project-Repo/src/mvp"
 ```
 
 **Step 2 — Create a Python virtual environment**
@@ -377,7 +377,8 @@ Key fields to understand:
 | Field | What it tells you |
 |-------|-------------------|
 | `risk.risk_score` | 0–100. Below 15 is safe. Above 80 is blocked. |
-| `risk.matched_signals` | The exact rule names that fired — useful for debugging why something scored high. |
+| `risk.risk_categories` | Attack families detected. `LLM_FLAGGED` means the LLM judge contributed. |
+| `risk.matched_signals` | Rule names that fired. `llm_judge_escalation` = judge confirmed; `llm_judge_failure` = judge crashed (fail-closed). |
 | `policy.policy_action` | The final decision: ALLOW, SANITIZE, REQUIRE_APPROVAL, QUARANTINE, or BLOCK. |
 | `policy.requires_approval` | If true, a human would need to approve before the tool runs (Sprint 2 feature). |
 | `gateway.gateway_decision` | EXECUTED (tool ran) or DENIED (tool blocked). |
@@ -438,7 +439,8 @@ mvp/
 │   ├── ingest/
 │   │   └── normalizer.py        # HTML decode, zero-width strip, Unicode NFKC, whitespace
 │   ├── risk/
-│   │   └── engine.py            # Rule-based scoring, 4 attack categories
+│   │   ├── engine.py            # Rule-based scoring + optional LLM judge
+│   │   └── llm_judge.py         # LLM classifier (OpenAI / Ollama), opt-in
 │   ├── policy/
 │   │   └── engine.py            # Score → deterministic PolicyAction
 │   ├── gateway/
@@ -489,6 +491,28 @@ of four attack families:
 
 Rules are additive — multiple matches increase the score. Score is capped at 100.
 To add a new rule, open `engine.py` and append a `Rule(...)` to the `RULES` list.
+
+#### Optional LLM judge
+
+When `LLM_JUDGE_ENABLED=true` is set and the LLM dependencies (`openai`, `httpx`)
+are installed, the engine calls a small LLM classifier as a second opinion on
+inputs that land in the **ambiguous score band** (`JUDGE_BAND_LOW`–`JUDGE_BAND_HIGH`,
+default 0–59). Clear signals (≥ 60) are already blocked by regex alone; the LLM
+is reserved for the uncertain middle.
+
+| Event | Score effect | Category added | Signal added |
+|-------|-------------|----------------|--------------|
+| Judge confirms manipulation (confidence ≥ 0.7) | raised to 70 (QUARANTINE) | `LLM_FLAGGED` | `llm_judge_escalation` |
+| Judge call fails / times out | raised to 80 (BLOCK) — fail closed | `LLM_FLAGGED` | `llm_judge_failure` |
+| Judge says benign | no change | — | — |
+
+`LLM_FLAGGED` in `risk_categories` means the LLM contributed to the score.
+Check `matched_signals` to distinguish a real detection from an infrastructure failure.
+
+The judge falls back to a local Ollama model if `OPENAI_API_KEY` is not set.
+Set `OLLAMA_URL` to override the default `http://localhost:11434`.
+If neither is available, leave `LLM_JUDGE_ENABLED=false` (the default) —
+the regex-only engine continues to work normally.
 
 ### Stage 3 — Policy Engine (`app/policy/engine.py`)
 

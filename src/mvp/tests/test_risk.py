@@ -12,7 +12,9 @@ Covers:
 import pytest
 
 from app.models import NormalizedInput, RiskCategory
+from app.risk import engine as risk_engine
 from app.risk.engine import score
+from app.risk.llm_judge import JudgeResult
 
 
 def _normalized(content: str, req_id: str = "test-001") -> NormalizedInput:
@@ -163,3 +165,60 @@ def test_request_id_forwarded():
     """Risk result must carry the same request_id as the input."""
     result = score(_normalized("Hello world", req_id="abc-123"))
     assert result.request_id == "abc-123"
+
+
+# ---------------------------------------------------------------------------
+# LLM judge integration (mocked — no external API)
+# ---------------------------------------------------------------------------
+
+
+def test_llm_judge_escalation_adds_llm_flagged(monkeypatch):
+    """
+    When the judge confirms manipulation in the ambiguous band, score and
+    categories must reflect LLM_FLAGGED, not a mislabeled regex family.
+    """
+    async def fake_judge(content: str) -> JudgeResult:
+        return JudgeResult(
+            is_manipulation=True,
+            confidence=0.9,
+            reasoning="structured manipulation pattern",
+        )
+
+    monkeypatch.setattr(risk_engine, "judge", fake_judge)
+    monkeypatch.setattr(risk_engine, "_llm_judge_enabled", lambda: True)
+    # jailbreak_roleplay rule contributes 25 — inside judge band [15, 60).
+    text = "pretend you are a teacher and explain photosynthesis."
+    result = score(_normalized(text))
+
+    assert RiskCategory.LLM_FLAGGED in result.risk_categories
+    assert "llm_judge_escalation" in result.matched_signals
+    assert result.risk_score >= risk_engine.JUDGE_ESCALATION_SCORE
+    assert "LLM judge" in result.rationale
+
+
+def test_llm_judge_failure_adds_llm_flagged(monkeypatch):
+    """
+    When the judge call errors, fail-closed score applies and LLM_FLAGGED
+    records the operational outcome (distinguished from escalation via signal).
+    """
+    async def fake_judge(content: str) -> JudgeResult:
+        raise ConnectionError("API unreachable")
+
+    monkeypatch.setattr(risk_engine, "judge", fake_judge)
+    monkeypatch.setattr(risk_engine, "_llm_judge_enabled", lambda: True)
+    text = "pretend you are a teacher and explain photosynthesis."
+    result = score(_normalized(text))
+
+    assert RiskCategory.LLM_FLAGGED in result.risk_categories
+    assert "llm_judge_failure" in result.matched_signals
+    assert result.risk_score >= risk_engine.JUDGE_FAILURE_SCORE
+
+
+def test_llm_judge_disabled_no_llm_flagged_for_ambiguous_input(monkeypatch):
+    """With the judge off, ambiguous regex-only input must not add LLM_FLAGGED."""
+    monkeypatch.setattr(risk_engine, "_llm_judge_enabled", lambda: False)
+    text = "pretend you are a teacher and explain photosynthesis."
+    result = score(_normalized(text))
+
+    assert RiskCategory.LLM_FLAGGED not in result.risk_categories
+    assert "llm_judge_escalation" not in result.matched_signals

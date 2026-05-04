@@ -12,7 +12,9 @@ Exposes two endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -23,6 +25,18 @@ from app.ingest import normalizer
 from app.models import PipelineRequest, PipelineResponse
 from app.policy import engine as policy_engine
 from app.risk import engine as risk_engine
+
+# ---------------------------------------------------------------------------
+# Process-level asyncio configuration
+# Reason: on Windows, the default ProactorEventLoop emits noisy warnings
+# when asyncio.run() is called repeatedly (as the LLM judge does). The
+# Selector policy avoids those warnings. Set here at the entry point so
+# library modules stay free of import-time side effects.
+# ---------------------------------------------------------------------------
+
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 
 # ---------------------------------------------------------------------------
 # Logging setup — structured output to stdout
