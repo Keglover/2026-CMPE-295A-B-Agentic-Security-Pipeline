@@ -10,6 +10,16 @@ build/
 audit_logs/*.ndjson
 .DS_Store
 
+# Local worktree metadata/artifacts
+.worktrees/
+
+# Runtime artifacts (MVP)
+src/mvp/audit_logs/*.ndjson
+src/mvp/sandbox/notes/*
+!src/mvp/sandbox/notes/.gitkeep
+sandbox/notes/*
+!sandbox/notes/.gitkeep
+
 # Project-specific exclusions
 tracker/
 Notes and Research/
@@ -20,6 +30,7 @@ test_payload.json
 .vscode/
 scripts/README.md
 to-do.txt
+pre-prod.md
 
 # gVisor setup — API key must never be committed
 gvisor/ollama.env

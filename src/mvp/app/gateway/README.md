@@ -5,10 +5,6 @@ Policy-mediated security for tool-using LLM agents.
 This project treats tool execution as a high-trust operation and enforces a strict boundary:
 all tool calls pass through one gateway before any executor runs.
 
-Current layout note:
-- Active implementation, Docker stack, configs, and tests now live under `src/mvp`.
-- Unless explicitly stated otherwise, commands below should be run from `src/mvp`.
-
 ## What this system does
 
 - Normalizes and inspects user input before execution decisions.
@@ -37,10 +33,10 @@ Primary enforcement responsibilities:
 
 Relevant code:
 
-- src/mvp/app/gateway/gateway.py
-- src/mvp/app/gateway/sandbox_client.py
-- src/mvp/app/gateway/executor_policy.py
-- src/mvp/config/tool_registry.yaml
+- app/gateway/gateway.py
+- app/gateway/sandbox_client.py
+- app/gateway/executor_policy.py
+- config/tool_registry.yaml
 
 ### How gateway fits into the larger pipeline
 
@@ -192,7 +188,6 @@ Expected output includes `runsc` in the Runtimes list.
 
 ```bash
 # from repository root
-cd src/mvp
 docker build -t agentic-security-tool-image .
 USE_GVISOR=true docker compose up -d --build
 ```
@@ -213,7 +208,7 @@ docker compose logs --tail 120 tool-runner | grep -E "runtime=runsc|Spawning con
 
 ### Step 7: Set Ollama API key for cloud model support (optional)
 
-Cloud models such as kimi-k2.6:cloud require an API key. Pass it at egress-proxy startup:
+Cloud models such as kimi-k2.5:cloud require an API key. Pass it at egress-proxy startup:
 
 ```bash
 OLLAMA_API_KEY="<your-key>" docker compose up -d --force-recreate egress-proxy
@@ -250,7 +245,7 @@ Why this script exists:
 
 Script location:
 
-- src/mvp/scripts/inject-runsc.ps1
+- scripts/inject-runsc.ps1
 
 ---
 
@@ -372,7 +367,6 @@ curl -s "http://localhost:8000/history?limit=20" | jq
 curl -s http://localhost:8000/policy/stats | jq
 
 # Run tests
-# from src/mvp
 python -m pytest tests/ -v
 ```
 
@@ -380,15 +374,15 @@ python -m pytest tests/ -v
 
 ## Key source map
 
-- src/mvp/app/main.py
-- src/mvp/app/gateway/gateway.py
-- src/mvp/app/gateway/sandbox_client.py
-- src/mvp/app/sandbox/service.py
-- src/mvp/app/gateway/gateway_real.py
-- src/mvp/app/planner/engine.py
-- src/mvp/app/policy/engine.py
-- src/mvp/config/tool_registry.yaml
-- src/mvp/scripts/inject-runsc.ps1
+- app/main.py
+- app/gateway/gateway.py
+- app/gateway/sandbox_client.py
+- app/sandbox/service.py
+- app/gateway/gateway_real.py
+- app/planner/engine.py
+- app/policy/engine.py
+- config/tool_registry.yaml
+- scripts/inject-runsc.ps1
 
 ---
 
@@ -408,8 +402,10 @@ Requirements:
 Install and register runtime:
 
 ```bash
-# Use the direct install steps in "Recreate execution in Linux" above.
-# The older gVisor helper scripts were removed from the repository root.
+cd gvisor
+bash setup-docker.sh
+bash setup-gvisor.sh
+bash setup-runtime.sh
 
 # Verify
 docker info | grep -A3 Runtimes
@@ -419,7 +415,6 @@ runsc --version
 Start stack with gVisor:
 
 ```bash
-# from src/mvp
 docker build -t agentic-security-tool-image .
 USE_GVISOR=true docker compose up --build -d
 docker logs tool-runner 2>&1 | grep -E "runtime|runsc|gVisor"
@@ -429,11 +424,11 @@ docker logs tool-runner 2>&1 | grep -E "runtime|runsc|gVisor"
 
 No for native Linux.
 
-Use src/mvp/scripts/inject-runsc.ps1 only for Windows Docker Desktop workflows where runtime registration can be reset after startup. On Linux, configure runsc directly once with normal daemon configuration.
+Use scripts/inject-runsc.ps1 only for Windows Docker Desktop workflows where runtime registration can be reset after startup. On Linux, configure runsc directly once with normal daemon configuration.
 
 ### Cloud model support
 
-Cloud models such as kimi-k2.6:cloud run on Ollama infrastructure.
+Cloud models such as kimi-k2.5:cloud run on Ollama infrastructure.
 
 Flow:
 
@@ -461,7 +456,7 @@ docker exec agentic-security-egress-proxy printenv OLLAMA_API_KEY
 Run cloud E2E check:
 
 ```bash
-python3 src/mvp/scripts/test_cloud_pipeline.py
+python3 scripts/test_cloud_pipeline.py
 ```
 
 Expected:
@@ -474,8 +469,9 @@ Expected:
 Teardown and full reset:
 
 ```bash
-# If you need to reset runtime config, rerun the Linux install/register steps above.
-# There are no root-level gVisor teardown/setup helper scripts in the current layout.
+bash gvisor/teardown.sh
+bash gvisor/teardown.sh --full
+bash gvisor/setup.sh
 ```
 
 ---
@@ -895,7 +891,7 @@ Overrides:
 
 ## Tool registry summary
 
-Defined in src/mvp/config/tool_registry.yaml.
+Defined in config/tool_registry.yaml.
 
 | Tool | Required args | Network profile | Real behavior |
 |------|---------------|-----------------|---------------|
@@ -909,7 +905,7 @@ Defined in src/mvp/config/tool_registry.yaml.
 
 ## Configuration reference
 
-### src/mvp/config/policy_thresholds.yaml
+### config/policy_thresholds.yaml
 
 | Key | Description |
 |-----|-------------|
@@ -920,7 +916,7 @@ Defined in src/mvp/config/tool_registry.yaml.
 | high_attention_categories | categories that can escalate to approval |
 | fail_closed.default_action | action when scoring path fails |
 
-### src/mvp/config/tool_registry.yaml
+### config/tool_registry.yaml
 
 | Key | Description |
 |-----|-------------|
@@ -949,7 +945,7 @@ Defined in src/mvp/config/tool_registry.yaml.
 | OLLAMA_CONTAINER | ollama | ollama container name |
 | SUMMARIZE_LOCAL_MAX_CHARS | 8000 | local or cloud summarize threshold |
 | LLM_MODEL_LOCAL | qwen2.5:7b | local summarize model |
-| LLM_MODEL_CLOUD | kimi-k2.6:cloud | cloud summarize model |
+| LLM_MODEL_CLOUD | kimi-k2.5:cloud | cloud summarize model |
 | SANDBOX_TOOLS_URL | http://tool-runner:8001 | tools endpoint |
 | SANDBOX_LLM_URL | http://tool-runner:8001 | llm endpoint |
 | SANDBOX_DIR | /app/sandbox/notes | note path |
@@ -1019,5 +1015,3 @@ Planner execute-command synthesis vars:
 | PowerShell curl odd output | alias behavior | use curl.exe or Invoke-RestMethod |
 | runsc unavailable on desktop host | runtime limitation | use Linux or WSL2 for gVisor mode |
 | CRLF breaks scripts | line endings | normalize line endings in shell scripts |
-
-

@@ -1,0 +1,23 @@
+{
+  "name": "05 Pipeline - Write Note",
+  "method": "POST",
+  "url": "{{baseUrl}}/pipeline",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "request_id": "demo-write-note-001",
+    "source_type": "direct_prompt",
+    "content": "save meeting notes",
+    "proposed_tool": "write_note",
+    "tool_args": {
+      "title": "sprint-review",
+      "body": "# Sprint Review\nCompleted: gVisor integration."
+    }
+  },
+  "expected": {
+    "status": 200,
+    "policy_action": "ALLOW",
+    "gateway_decision": "EXECUTED"
+  }
+}

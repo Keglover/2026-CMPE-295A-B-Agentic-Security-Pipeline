@@ -1,0 +1,21 @@
+{
+  "name": "08 Pipeline - Fetch URL (Blocked: Private IP)",
+  "method": "POST",
+  "url": "{{baseUrl}}/pipeline",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "request_id": "demo-private-ip-001",
+    "source_type": "direct_prompt",
+    "content": "fetch internal service",
+    "proposed_tool": "fetch_url",
+    "tool_args": {
+      "url": "http://192.168.1.1/admin"
+    }
+  },
+  "expected": {
+    "status": 200,
+    "gateway_decision": "DENIED"
+  }
+}

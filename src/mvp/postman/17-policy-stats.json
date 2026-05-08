@@ -1,0 +1,13 @@
+{
+  "name": "17 Policy Stats",
+  "method": "GET",
+  "url": "{{baseUrl}}/policy/stats",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": null,
+  "expected": {
+    "status": 200,
+    "response_keys": ["actions"]
+  }
+}
