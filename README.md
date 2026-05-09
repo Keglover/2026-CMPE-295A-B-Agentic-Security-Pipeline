@@ -42,7 +42,7 @@ Relevant code:
 - src/mvp/app/gateway/executor_policy.py
 - src/mvp/config/tool_registry.yaml
 
-### How gateway fits into the larger pipeline
+### How the pipeline works
 
 ```mermaid
 flowchart LR
