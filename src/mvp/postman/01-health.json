@@ -1,0 +1,13 @@
+{
+  "name": "01 Health",
+  "method": "GET",
+  "url": "{{baseUrl}}/health",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": null,
+  "expected": {
+    "status": 200,
+    "response_keys": ["status", "version"]
+  }
+}

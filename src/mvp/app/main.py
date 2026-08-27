@@ -4,26 +4,53 @@ FastAPI application entry point.
 Wires together the five pipeline modules in the correct order:
   ingest/normalize → risk engine → policy engine → tool gateway → audit log
 
-Exposes two endpoints:
-  POST /pipeline   — Run the full security pipeline on a payload.
-  GET  /health     — Quick liveness check.
-  GET  /tools      — List the allowed tools and their required arguments.
+Exposes endpoints:
+  POST /pipeline           — Run the full security pipeline on a payload.
+  GET  /health             — Quick liveness check.
+  GET  /tools              — List the allowed tools and their required arguments.
+  GET  /history            — Query past audit log entries.
+  POST /approve/{id}       — Human approval for REQUIRE_APPROVAL actions.
+  POST /reject/{id}        — Human rejection for REQUIRE_APPROVAL actions.
+  GET  /pending            — List pending approval requests.
+  GET  /policy/stats       — Policy decision statistics.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.audit import logger as audit
+from app.approval.workflow import approval_manager
 from app.gateway import gateway
+from app.gateway.circuit_breaker import circuit_registry
+from app.gateway.domain_validation import validate_tool_urls
 from app.ingest import normalizer
-from app.models import PipelineRequest, PipelineResponse
+from app.models import (
+    DomainValidationResult,
+    ValidateUrlsRequest,
+    ValidateUrlsResponse,
+    PipelineRequest,
+    PipelineResponse,
+    PolicyAction,
+    PolicyResult,
+    PlannerRequest,
+    GatewayDecision,
+    GatewayResult,
+)
+from app.planner.engine import get_planner
 from app.policy import engine as policy_engine
+from app.policy.pii_detector import redact as pii_redact
+from app.policy import prompt_guard
 from app.risk import engine as risk_engine
 
 # ---------------------------------------------------------------------------
@@ -37,16 +64,43 @@ from app.risk import engine as risk_engine
 if os.name == "nt":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-
 # ---------------------------------------------------------------------------
 # Logging setup — structured output to stdout
 # ---------------------------------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="[%(asctime)s] %(levelname)s [%(name)s] %(message)s",
 )
-_log = logging.getLogger("main")
+_log = logging.getLogger(__name__)
+
+planner_engine = get_planner()
+
+# ---------------------------------------------------------------------------
+# Background tasks — approval timeout enforcement
+# ---------------------------------------------------------------------------
+
+
+async def _approval_timeout_loop() -> None:
+    """Periodically sweep pending approvals and auto-deny expired ones."""
+    while True:
+        try:
+            timed_out = approval_manager.check_timeouts()
+            if timed_out:
+                _log.info("Auto-denied %d timed-out approval(s)", len(timed_out))
+        except Exception:
+            _log.exception("Error in approval timeout sweep")
+        await asyncio.sleep(30)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup/shutdown lifecycle — launches background tasks."""
+    task = asyncio.create_task(_approval_timeout_loop())
+    _log.info("Approval timeout background task started")
+    yield
+    task.cancel()
+
 
 # ---------------------------------------------------------------------------
 # App
@@ -59,7 +113,8 @@ app = FastAPI(
         "processing from privileged tool execution. "
         "Every request flows through: normalize → risk → policy → gateway → audit."
     ),
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=_lifespan,
 )
 
 
@@ -71,7 +126,12 @@ app = FastAPI(
 @app.get("/health", tags=["meta"])
 def health() -> dict:
     """Liveness check — returns 200 if the service is running."""
-    return {"status": "ok", "version": "0.1.0"}
+    return {
+        "status": "ok",
+        "version": "0.2.0",
+        "circuit_breakers": circuit_registry.health_summary(),
+        "pending_approvals": approval_manager.pending_count,
+    }
 
 
 @app.get("/tools", tags=["meta"])
@@ -83,6 +143,18 @@ def list_tools() -> dict:
     }
 
 
+@app.post("/validate-urls", response_model=ValidateUrlsResponse, tags=["pipeline"])
+def validate_urls(request: ValidateUrlsRequest) -> ValidateUrlsResponse:
+    """Pre-flight URL validation for tool arguments used by UI and tests."""
+    entries = validate_tool_urls(request.tool_args, request.approved_domains)
+    blocked_count = sum(1 for entry in entries if not entry.is_approved)
+    return ValidateUrlsResponse(
+        urls=entries,
+        blocked_count=blocked_count,
+        can_proceed=(blocked_count == 0),
+    )
+
+
 @app.post("/pipeline", response_model=PipelineResponse, tags=["pipeline"])
 def run_pipeline(request: PipelineRequest) -> PipelineResponse:
     """
@@ -92,19 +164,14 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
       1. Normalize  — clean the input text
       2. Risk score — detect attack signals
       3. Policy     — decide what to do
+      3b. PII redaction (if SANITIZE)
       4. Gateway    — execute the tool (if proposed and allowed)
       5. Audit      — write the decision trace
-
-    A tool call is only attempted when `proposed_tool` is set in the request.
-    If no tool is proposed the gateway stage is skipped.
-
-    Args:
-        request (PipelineRequest): The input payload.
-
-    Returns:
-        PipelineResponse: Full trace of every stage's decision.
     """
     _log.info("Pipeline start request_id=%s", request.request_id)
+
+    # Stage 0: Prompt Guard pre-check (rule/model-based detector)
+    prompt_guard_result = prompt_guard.detect(request.request_id, request.content)
 
     # Stage 1: Normalize
     normalized = normalizer.normalize(request)
@@ -123,15 +190,94 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
         [c.value for c in risk.risk_categories],
     )
 
-    # Stage 3: Policy decision
-    policy = policy_engine.decide(risk)
+    # Stage 3: Policy decision (with fail-closed wrapper)
+    try:
+        policy = policy_engine.decide(risk)
+    except Exception as exc:
+        _log.error(
+            "Policy engine failed for request_id=%s: %s — fail-closed to BLOCK",
+            request.request_id, exc,
+        )
+        policy = PolicyResult(
+            request_id=risk.request_id,
+            policy_action=PolicyAction.BLOCK,
+            policy_reason=policy_engine.FAIL_CLOSED_REASON,
+            requires_approval=False,
+        )
     _log.info(
         "Policy request_id=%s action=%s",
         request.request_id,
         policy.policy_action.value,
     )
 
-    # Stage 4: Gateway (only when a tool call is proposed)
+    # Stage 3b: PII redaction when policy is SANITIZE
+    sanitization_applied = False
+    pii_found: list[str] = []
+    if policy.policy_action == PolicyAction.SANITIZE:
+        redacted_content, pii_matches = pii_redact(request.content)
+        if pii_matches:
+            sanitization_applied = True
+            pii_found = list({m.pii_type.value for m in pii_matches})
+            # Replace request content with redacted version for gateway
+            request = request.model_copy(update={"content": redacted_content})
+            _log.info(
+                "PII redacted request_id=%s types=%s count=%d",
+                request.request_id, pii_found, len(pii_matches),
+            )
+
+    # Stage 3c: Planner Selection (when no tool is proposed but intent might exist)
+    if not request.proposed_tool and policy.policy_action in (PolicyAction.ALLOW, PolicyAction.SANITIZE):
+        _log.info("No tool proposed; invoking Planner stage for request_id=%s", request.request_id)
+        try:
+            planner_req = PlannerRequest(
+                task_description=request.content,
+                available_tools=gateway._registry.get("tools", {}),
+                risk_score=risk.risk_score,
+                policy_action=policy.policy_action,
+                request_id=request.request_id,
+            )
+            planner_res = planner_engine.plan(planner_req)
+            if planner_res.tool_name != "unknown":
+                _log.info(
+                    "Planner suggested tool_name=%s for request_id=%s",
+                    planner_res.tool_name, request.request_id
+                )
+                request = request.model_copy(update={
+                    "proposed_tool": planner_res.tool_name,
+                    "tool_args": planner_res.tool_args,
+                })
+            else:
+                _log.info("Planner could not map task to any tool for request_id=%s", request.request_id)
+        except Exception as exc:
+            _log.error(
+                "Planner engine failed for request_id=%s: %s",
+                request.request_id, exc,
+            )
+
+    # Stage 4: Domain validation for URL-bearing tool args.
+    # Keep this separate from policy engine logic: this is tool-stage enforcement.
+    domain_validation: list[DomainValidationResult] = []
+    if request.proposed_tool:
+        domain_validation = validate_tool_urls(
+            request.tool_args,
+            request.approved_domains,
+        )
+        blocked_hosts = sorted({
+            item.hostname for item in domain_validation
+            if not item.is_approved and item.hostname
+        })
+        if blocked_hosts:
+            policy = PolicyResult(
+                request_id=policy.request_id,
+                policy_action=PolicyAction.BLOCK,
+                policy_reason=(
+                    "Tool URL validation blocked one or more hostnames: "
+                    f"{blocked_hosts}."
+                ),
+                requires_approval=False,
+            )
+
+    # Stage 5: Gateway (only when a tool call is proposed)
     gateway_result = None
     if request.proposed_tool:
         gateway_result = gateway.mediate(request, policy)
@@ -141,7 +287,7 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
             gateway_result.gateway_decision.value,
         )
 
-    # Stage 5: Audit log
+    # Stage 6: Audit log
     audit.record(request, risk, policy, gateway_result)
 
     # Build human-readable summary
@@ -149,6 +295,13 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
         f"Score: {risk.risk_score}/100",
         f"Action: {policy.policy_action.value}",
     ]
+    if prompt_guard_result.is_injection:
+        summary_parts.append("PromptGuard: injection")
+    if sanitization_applied:
+        summary_parts.append(f"PII redacted: {pii_found}")
+    if domain_validation:
+        blocked_count = sum(1 for item in domain_validation if not item.is_approved)
+        summary_parts.append(f"Domain blocked: {blocked_count}")
     if gateway_result:
         summary_parts.append(f"Gateway: {gateway_result.gateway_decision.value}")
     summary = " | ".join(summary_parts)
@@ -156,8 +309,148 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
     return PipelineResponse(
         request_id=request.request_id,
         normalized=normalized,
+        prompt_guard=prompt_guard_result,
         risk=risk,
         policy=policy,
         gateway=gateway_result,
+        domain_validation=domain_validation,
+        sanitization_applied=sanitization_applied,
+        pii_found=pii_found,
         summary=summary,
     )
+
+
+# ---------------------------------------------------------------------------
+# Approval Endpoints
+# ---------------------------------------------------------------------------
+
+
+class ApprovalBody(BaseModel):
+    """Request body for approve/reject actions."""
+    approved_by: str = "human_reviewer"
+    reason: str = ""
+
+
+@app.get("/pending", tags=["approval"])
+def list_pending() -> dict:
+    """List all requests awaiting human approval."""
+    pending = approval_manager.list_pending()
+    return {
+        "count": len(pending),
+        "pending": [
+            {
+                "request_id": r.request_id,
+                "risk_score": r.risk_score,
+                "proposed_tool": r.proposed_tool,
+                "status": r.status.value,
+                "created_at": r.created_at,
+            }
+            for r in pending
+        ],
+    }
+
+
+@app.post("/approve/{request_id}", tags=["approval"])
+def approve_request(request_id: str, body: ApprovalBody | None = None) -> dict:
+    """Approve a pending REQUIRE_APPROVAL request."""
+    body = body or ApprovalBody()
+    record = approval_manager.approve(
+        request_id, approved_by=body.approved_by, reason=body.reason,
+    )
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Request '{request_id}' not found in pending queue.",
+        )
+    return {
+        "request_id": record.request_id,
+        "status": record.status.value,
+        "resolved_by": record.resolved_by,
+        "reason": record.reason,
+    }
+
+
+@app.post("/reject/{request_id}", tags=["approval"])
+def reject_request(request_id: str, body: ApprovalBody | None = None) -> dict:
+    """Reject a pending REQUIRE_APPROVAL request."""
+    body = body or ApprovalBody()
+    record = approval_manager.reject(
+        request_id, rejected_by=body.approved_by, reason=body.reason,
+    )
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Request '{request_id}' not found in pending queue.",
+        )
+    return {
+        "request_id": record.request_id,
+        "status": record.status.value,
+        "resolved_by": record.resolved_by,
+        "reason": record.reason,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Audit & Stats Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/history", tags=["audit"])
+def get_history(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    policy_action: Optional[str] = Query(None),
+    request_id: Optional[str] = Query(None),
+) -> dict:
+    """Query past audit log entries from audit_logs/audit.ndjson."""
+    log_path = audit._LOG_PATH
+    if not log_path.exists():
+        return {"total": 0, "entries": []}
+
+    entries: list[dict] = []
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Apply filters
+            if request_id and entry.get("request_id") != request_id:
+                continue
+            if policy_action and entry.get("policy_action") != policy_action:
+                continue
+            entries.append(entry)
+
+    total = len(entries)
+    # Return newest first, with pagination
+    entries.reverse()
+    page = entries[offset : offset + limit]
+    return {"total": total, "limit": limit, "offset": offset, "entries": page}
+
+
+@app.get("/policy/stats", tags=["policy"])
+def policy_stats() -> dict:
+    """Return policy decision statistics aggregated from the audit log."""
+    log_path = audit._LOG_PATH
+    if not log_path.exists():
+        return {"total": 0, "actions": {}}
+
+    action_counts: dict[str, int] = {}
+    total = 0
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            action = entry.get("policy_action", "UNKNOWN")
+            action_counts[action] = action_counts.get(action, 0) + 1
+            total += 1
+
+    return {"total": total, "actions": action_counts}

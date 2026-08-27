@@ -1,0 +1,22 @@
+{
+  "name": "04 Pipeline - Benign Summarize",
+  "method": "POST",
+  "url": "{{baseUrl}}/pipeline",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "request_id": "demo-benign-001",
+    "source_type": "direct_prompt",
+    "content": "summarize project abstract",
+    "proposed_tool": "summarize",
+    "tool_args": {
+      "text": "Large Language Models are increasingly deployed as agentic systems that can browse the web and call third-party tools."
+    }
+  },
+  "expected": {
+    "status": 200,
+    "policy_action": "ALLOW",
+    "gateway_decision": "EXECUTED"
+  }
+}

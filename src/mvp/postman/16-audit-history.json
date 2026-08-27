@@ -1,0 +1,13 @@
+{
+  "name": "16 Audit History",
+  "method": "GET",
+  "url": "{{baseUrl}}/history?limit=20",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": null,
+  "expected": {
+    "status": 200,
+    "response_keys": ["entries"]
+  }
+}
