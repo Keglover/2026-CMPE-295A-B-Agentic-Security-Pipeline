@@ -70,10 +70,56 @@ def _mock_fetch_url(args: dict[str, Any]) -> str:
     return f"[MOCK] Content from '{url}': <p>Example page content (simulated).</p>"
 
 
+def _mock_execute_command(args: dict[str, Any]) -> str:
+    """
+    Simulate command execution without running any real command.
+
+    Args:
+        args (dict): Must contain 'command' (str).
+
+    Returns:
+        str: Simulated command output.
+    """
+    command = str(args.get("command", "")).strip()
+    if not command:
+        return "[MOCK] Missing command argument."
+    return f"[MOCK] Executed command in sandbox simulation: {command}"
+
+
+def _mock_transcribe_audio(args: dict[str, Any]) -> str:
+    """Return a deterministic mock transcript for audio URLs."""
+    audio_url = str(args.get("audio_url", "")).strip()
+    return f"[MOCK] Transcribed audio from '{audio_url}': Hello, this is a simulated transcript."
+
+
+def _mock_analyze_image(args: dict[str, Any]) -> str:
+    """Return a deterministic mock image analysis answer."""
+    image_url = str(args.get("image_url", "")).strip()
+    prompt = str(args.get("prompt", "")).strip()
+    return (
+        "[MOCK] Image analysis for "
+        f"'{image_url}' with prompt '{prompt}': A workspace with a laptop, notebook, and coffee mug."
+    )
+
+
+def _mock_document_qa(args: dict[str, Any]) -> str:
+    """Return a deterministic mock answer for document Q&A."""
+    document_url = str(args.get("document_url", "")).strip()
+    query = str(args.get("query", "")).strip()
+    return (
+        "[MOCK] Document Q&A for "
+        f"'{document_url}' and query '{query}': Q3 revenue grew 14% year-over-year."
+    )
+
+
 # Exported registry consumed by gateway.py
 EXECUTORS: dict[str, Callable[[dict[str, Any]], str]] = {
     "summarize": _mock_summarize,
     "write_note": _mock_write_note,
     "search_notes": _mock_search_notes,
     "fetch_url": _mock_fetch_url,
+    "execute_command": _mock_execute_command,
+    "transcribe_audio": _mock_transcribe_audio,
+    "analyze_image": _mock_analyze_image,
+    "document_qa": _mock_document_qa,
 }

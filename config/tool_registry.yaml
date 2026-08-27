@@ -1,0 +1,256 @@
+# =============================================================================
+# Tool Proxy — Tool Registry Configuration
+# =============================================================================
+# Project Plan Ref: Tasks 3.3, 3.4, 3.5 (Phase 3 — Core Development: Tool Proxy)
+#
+# This file externalizes the TOOL_SCHEMAS dict currently hardcoded in
+# app/gateway/gateway.py. Once loaded by the gateway at startup, new tools
+# can be added without code changes.
+#
+# TODO: [ ] Task 3.3 — Wire gateway.py to read this file at startup
+# TODO: [ ] Task 3.4 — Add description, risk_tier, privilege_level metadata
+# TODO: [ ] Task 3.5 — Implement POST /tools/register for dynamic registration
+# TODO: [ ] Task 2.8 — Schema evolution strategy (registry versioning)
+# =============================================================================
+
+version: "1.0"
+
+# ---------------------------------------------------------------------------
+# Tool Definitions
+# ---------------------------------------------------------------------------
+# Each tool declares:
+#   - required_args: Arguments that MUST be present (schema validation)
+#   - optional_args: Arguments that MAY be present
+#   - arg_types: Type constraints per argument (for Task 3.7)
+#   - risk_tier: low | medium | high (informs policy overrides)
+#   - description: Human-readable purpose
+#   - enabled: Whether the tool is currently active in the allowlist
+
+tools:
+  summarize:
+    description: "Generate a summary of the provided text"
+    capability_tags: [llm, read]
+    cost_hint: high
+    latency_hint: slow
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
+    required_args:
+      - text
+    optional_args: []
+    arg_types:
+      text: string
+    arg_constraints:
+      text:
+        max_length: 50000
+    risk_tier: low
+    enabled: true
+
+  write_note:
+    description: "Write a note to the sandbox notes directory"
+    capability_tags: [filesystem, write]
+    cost_hint: low
+    latency_hint: fast
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
+    required_args:
+      - title
+      - body
+    optional_args: []
+    arg_types:
+      title: string
+      body: string
+    arg_constraints:
+      title:
+        max_length: 200
+        pattern: "^[a-zA-Z0-9_\\-\\s]+$"
+      body:
+        max_length: 10000
+    risk_tier: medium
+    enabled: true
+
+  search_notes:
+    description: "Search notes by keyword query"
+    capability_tags: [filesystem, read]
+    cost_hint: low
+    latency_hint: fast
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
+    required_args:
+      - query
+    optional_args: []
+    arg_types:
+      query: string
+    arg_constraints:
+      query:
+        max_length: 500
+    risk_tier: low
+    enabled: true
+
+  fetch_url:
+    description: "Fetch content from a URL over HTTP"
+    capability_tags: [network, retrieval]
+    cost_hint: medium
+    latency_hint: fast
+    trust_tier: sandboxed
+    requires_approval_if_chained: false
+    required_args:
+      - url
+    optional_args: []
+    arg_types:
+      url: url
+    arg_constraints:
+      url:
+        max_length: 2048
+    risk_tier: high
+    enabled: true
+
+  execute_command:
+    description: "Execute a shell command inside the sandbox runtime"
+    capability_tags: [execution, shell]
+    cost_hint: medium
+    latency_hint: medium
+    trust_tier: sandboxed
+    requires_approval_if_chained: true
+    required_args:
+      - command
+    optional_args:
+      - timeout_sec
+      - working_dir
+    arg_types:
+      command: string
+      timeout_sec: number
+      working_dir: string
+    arg_constraints:
+      command:
+        max_length: 4000
+      timeout_sec:
+        min: 1
+        max: 60
+      working_dir:
+        max_length: 200
+    risk_tier: high
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Domain Allowlist (for fetch_url — Task 3.15, 7.1)
+# ---------------------------------------------------------------------------
+# TODO: [ ] Task 3.15 — Enforce domain allowlist in real fetch_url executor
+# TODO: [ ] Task 7.1  — Audit for SSRF (block private IP ranges)
+domain_allowlist:
+  - "example.com"
+  - "en.wikipedia.org"
+  - "ollama.ai"
+  - "api.ollama.ai"
+  - "ollama.com"          # Required for kimi-k2.5:cloud and other cloud-tagged models
+  # Add approved domains here. All others are blocked.
+
+# ---------------------------------------------------------------------------
+# Sandbox Execution Topology
+# ---------------------------------------------------------------------------
+sandbox:
+  enabled: true
+  endpoints:
+    tools: "http://tool-runner:8001"
+    llm: "http://tool-runner:8001"  # Phase 3 consolidates all executors here
+  summarize:
+    local_max_chars: 8000
+    local_route: control-net
+    cloud_route: egress-net
+    require_approval_above_local_max: true
+  tool_routes:
+    fetch_url: tools
+    write_note: tools
+    search_notes: tools
+    summarize: tools
+    execute_command: tools
+
+egress_proxy:
+  endpoint: "http://egress-proxy:8002"
+  max_response_bytes: 10485760
+
+# ---------------------------------------------------------------------------
+# Rate Limits (Task 3.20)
+# ---------------------------------------------------------------------------
+rate_limits:
+  global:
+    requests_per_minute: 60
+    burst: 10
+  by_tool:
+    fetch_url:
+      requests_per_minute: 10
+      burst: 3
+    write_note:
+      requests_per_minute: 30
+      burst: 5
+
+# ---------------------------------------------------------------------------
+# Execution Policy — timeout and retry semantics per tool
+# ---------------------------------------------------------------------------
+# timeout_sec:    Wall-clock seconds before the executor call is abandoned.
+# retry:
+#   max_attempts: Total attempts (1 = no retry, 2 = one retry, etc.)
+#   backoff_base: Initial wait in seconds between attempts (exponential).
+#   backoff_max:  Upper cap on wait time in seconds.
+#   retryable:    Substrings in the error message that permit a retry.
+#                 Errors NOT matching are treated as permanent failures and
+#                 will NOT be retried (e.g. validation errors, auth failures).
+execution:
+  defaults:
+    timeout_sec: 10.0
+    retry:
+      max_attempts: 1        # No retry by default — override per tool below
+      backoff_base: 0.5
+      backoff_max: 5.0
+      retryable:
+        - "timeout"
+        - "connect"
+        - "temporarily unavailable"
+
+  by_tool:
+    summarize:
+      # LLM inference can be slow: generous timeout, one retry on transient error.
+      timeout_sec: 90.0
+      retry:
+        max_attempts: 2
+        backoff_base: 1.0
+        backoff_max: 10.0
+        retryable:
+          - "timeout"
+          - "connect"
+          - "temporarily unavailable"
+
+    write_note:
+      # Pure filesystem operation: tight timeout, no retry (idempotency risk).
+      timeout_sec: 5.0
+      retry:
+        max_attempts: 1
+
+    search_notes:
+      # Read-only filesystem glob: tight timeout, safe to retry once.
+      timeout_sec: 5.0
+      retry:
+        max_attempts: 2
+        backoff_base: 0.25
+        backoff_max: 1.0
+        retryable:
+          - "timeout"
+
+    fetch_url:
+      # External HTTP: medium timeout, retry transient network errors.
+      timeout_sec: 15.0
+      retry:
+        max_attempts: 3
+        backoff_base: 0.5
+        backoff_max: 5.0
+        retryable:
+          - "timeout"
+          - "connect"
+          - "temporarily unavailable"
+          - "503"
+          - "429"
+
+    execute_command:
+      # Command execution can be expensive and may have side effects.
+      timeout_sec: 30.0
+      retry:
+        max_attempts: 1

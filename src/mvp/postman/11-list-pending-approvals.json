@@ -1,0 +1,13 @@
+{
+  "name": "11 List Pending Approvals",
+  "method": "GET",
+  "url": "{{baseUrl}}/pending",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": null,
+  "expected": {
+    "status": 200,
+    "response_keys": ["pending"]
+  }
+}

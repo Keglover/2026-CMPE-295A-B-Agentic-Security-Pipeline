@@ -28,6 +28,18 @@ from app.risk.engine import score
 from app.policy.engine import decide
 
 
+def _print_mode_banner() -> None:
+    """Explain what this runner does and does not test."""
+    print("\n[dao-risk-policy baseline runner]")
+    print("- Uses direct Python calls: normalize/risk/policy only.")
+    print("- Does NOT call FastAPI /pipeline or gateway tool execution.")
+    print("- Does NOT exercise Docker, gVisor, Ollama tool routes, or tool sandboxes.")
+    print(
+        "- LLM judge path is only active for baseline b3; "
+        f"OPENAI_API_KEY set={bool(os.getenv('OPENAI_API_KEY'))}."
+    )
+
+
 # Baselines
 
 class Baseline(Enum):
@@ -142,6 +154,8 @@ def main():
         help="Which baseline(s) to run. Default: all",
     )
     args = parser.parse_args()
+
+    _print_mode_banner()
 
     baselines_to_run = []
     if args.baseline:

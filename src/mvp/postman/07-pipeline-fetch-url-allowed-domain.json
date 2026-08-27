@@ -1,0 +1,22 @@
+{
+  "name": "07 Pipeline - Fetch URL (Allowed Domain)",
+  "method": "POST",
+  "url": "{{baseUrl}}/pipeline",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "request_id": "demo-fetch-url-001",
+    "source_type": "direct_prompt",
+    "content": "fetch example page",
+    "proposed_tool": "fetch_url",
+    "tool_args": {
+      "url": "https://example.com"
+    }
+  },
+  "expected": {
+    "status": 200,
+    "policy_action": "ALLOW",
+    "gateway_decision": "EXECUTED"
+  }
+}
