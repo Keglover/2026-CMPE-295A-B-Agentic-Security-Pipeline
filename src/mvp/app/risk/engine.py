@@ -20,8 +20,6 @@ optional LLM judge (matched_signals distinguish escalation vs failure).
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import os
 import re
 from dataclasses import dataclass
@@ -29,15 +27,17 @@ from dataclasses import dataclass
 from app.models import NormalizedInput, RiskCategory, RiskResult
 
 try:
-    from app.risk.llm_judge import judge
+    from app.risk.llm_judge import run_judge_sync
 except ModuleNotFoundError:
     # Reason: graceful degradation when LLM dependencies (openai, httpx) are
     # not installed. Any other import failure (typo, syntax error, etc.) is
     # a real bug and should crash loudly at startup.
-    judge = None
+    run_judge_sync = None
+
+judge = run_judge_sync
 
 
-def _llm_judge_enabled() -> bool:
+def llm_judge_enabled() -> bool:
     """Read the LLM judge toggle at call time so CLI runs can flip it safely."""
     return os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
 
@@ -80,10 +80,8 @@ _FLAGS = re.IGNORECASE | re.DOTALL
 # ---------------------------------------------------------------------------
 
 # Score band in which rule-based matching is ambiguous enough to warrant a
-# second opinion from the LLM judge. Below LOW, regex is confident the input
-# is benign — skip the (paid) LLM call. At/above HIGH, regex is already
-# confident the input is hostile — also skip the call.
-JUDGE_BAND_LOW: int = 0
+# second opinion from the configured judge.
+JUDGE_BAND_LOW: int = 15
 JUDGE_BAND_HIGH: int = 60
 
 # Minimum confidence the judge must report before we trust its verdict
@@ -226,12 +224,12 @@ RULES: list[Rule] = [
 # ---------------------------------------------------------------------------
 
 
-def _cap_score(raw: int) -> int:
+def cap_score(raw: int) -> int:
     """Clamp score to the 0-100 range."""
     return max(0, min(100, raw))
 
 
-def _match_rules(text: str) -> tuple[int, list[str], dict[RiskCategory, int]]:
+def match_rules(text: str) -> tuple[int, list[str], dict[RiskCategory, int]]:
     """
     Run all regex rules against text and accumulate score and category weights.
 
@@ -253,38 +251,10 @@ def _match_rules(text: str) -> tuple[int, list[str], dict[RiskCategory, int]]:
                 detected_categories.get(rule.category, 0) + rule.score_contribution
             )
 
-    return _cap_score(risk_score), matched_signals, detected_categories
+    return cap_score(risk_score), matched_signals, detected_categories
 
 
-def _run_judge_safely(coro) -> object:
-    """
-    Run an async coroutine safely regardless of whether an event loop is
-    already running in the calling thread.
-
-    When called from a sync context (normal FastAPI `def` route, CLI) there
-    is no running loop, so asyncio.run() creates a fresh one as usual.
-
-    When called from an async context (async route, pytest-asyncio) asyncio.run()
-    would raise RuntimeError. Instead we submit the coroutine to a one-shot
-    thread that gets its own event loop, avoiding any conflict.
-
-    Args:
-        coro: An awaitable coroutine (e.g. judge(text)).
-
-    Returns:
-        Whatever the coroutine returns.
-    """
-    try:
-        asyncio.get_running_loop()
-        # A loop is already running — use a dedicated thread.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    except RuntimeError:
-        # No running loop — asyncio.run() is safe.
-        return asyncio.run(coro)
-
-
-def _apply_judge(
+def apply_judge(
     text: str,
     risk_score: int,
     matched_signals: list[str],
@@ -308,13 +278,21 @@ def _apply_judge(
     """
     judge_result = None
 
-    if not (_llm_judge_enabled() and judge and JUDGE_BAND_LOW <= risk_score < JUDGE_BAND_HIGH):
+    if not (
+        llm_judge_enabled()
+        and judge
+        and JUDGE_BAND_LOW <= risk_score < JUDGE_BAND_HIGH
+    ):
         return risk_score, matched_signals, detected_categories, judge_result
 
     try:
-        # Pass judge(text) as the coroutine so monkeypatching `judge` in tests
-        # is reflected here without a separate global lookup.
-        judge_result = _run_judge_safely(judge(text))
+        judge_result = judge(
+            text,
+            {
+                "regex_score": risk_score,
+                "matched_signals": list(matched_signals),
+            },
+        )
 
         if (
             judge_result
@@ -332,8 +310,6 @@ def _apply_judge(
 
     except Exception:
         # Any judge error (network, API, crash) → fail closed. The "Event loop
-        # is closed" string filter from the original code is no longer needed
-        # because _run_judge_safely handles the event-loop conflict explicitly.
         risk_score = max(risk_score, JUDGE_FAILURE_SCORE)
         matched_signals.append("llm_judge_failure")
         detected_categories[RiskCategory.LLM_FLAGGED] = (
@@ -344,7 +320,7 @@ def _apply_judge(
     return risk_score, matched_signals, detected_categories, judge_result
 
 
-def _build_result(
+def build_result(
     request_id: str,
     risk_score: int,
     matched_signals: list[str],
@@ -431,10 +407,10 @@ def score(normalized: NormalizedInput) -> RiskResult:
             rationale="Empty input. No risk detected.",
         )
 
-    risk_score, matched_signals, detected_categories = _match_rules(text)
-    risk_score, matched_signals, detected_categories, judge_result = _apply_judge(
+    risk_score, matched_signals, detected_categories = match_rules(text)
+    risk_score, matched_signals, detected_categories, judge_result = apply_judge(
         text, risk_score, matched_signals, detected_categories
     )
-    return _build_result(
+    return build_result(
         normalized.request_id, risk_score, matched_signals, detected_categories, judge_result
     )

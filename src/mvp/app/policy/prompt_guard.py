@@ -83,7 +83,7 @@ _RULE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def _rule_based_detect(content: str) -> tuple[bool, float, str | None, str]:
+def rule_based_detect(content: str) -> tuple[bool, float, str | None, str]:
     """
     Run the lightweight rule-based guard.
 
@@ -163,7 +163,7 @@ class _ModelGuard:
         """
         if not self._ensure_loaded():
             # Model not available -- fall back to rules
-            return _rule_based_detect(text)
+            return rule_based_detect(text)
 
         try:
             import torch
@@ -185,7 +185,7 @@ class _ModelGuard:
             return is_injection, injection_prob, injection_type, rationale
         except Exception as exc:
             _log.warning("Model inference failed, falling back to rules: %s", exc)
-            return _rule_based_detect(text)
+            return rule_based_detect(text)
 
 
 # Singleton model guard -- created lazily on first detect() call
@@ -224,8 +224,20 @@ def detect(request_id: str, content: str) -> PromptGuardResult:
         is_injection, confidence, injection_type, rationale = guard.predict(content)
     else:
         # No model configured -- use rule-based guard exclusively
-        is_injection, confidence, injection_type, rationale = _rule_based_detect(content)
+        is_injection, confidence, injection_type, rationale = rule_based_detect(content)
 
+    return PromptGuardResult(
+        request_id=request_id,
+        is_injection=is_injection,
+        confidence=round(confidence, 4),
+        injection_type=injection_type,
+        rationale=rationale,
+    )
+
+
+def detect_rules(request_id: str, content: str) -> PromptGuardResult:
+    """Run only deterministic guard patterns for baseline evaluation."""
+    is_injection, confidence, injection_type, rationale = rule_based_detect(content)
     return PromptGuardResult(
         request_id=request_id,
         is_injection=is_injection,

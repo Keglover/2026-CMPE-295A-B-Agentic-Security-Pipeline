@@ -177,7 +177,7 @@ def test_llm_judge_escalation_adds_llm_flagged(monkeypatch):
     When the judge confirms manipulation in the ambiguous band, score and
     categories must reflect LLM_FLAGGED, not a mislabeled regex family.
     """
-    async def fake_judge(content: str) -> JudgeResult:
+    def fake_judge(content: str, context: dict) -> JudgeResult:
         return JudgeResult(
             is_manipulation=True,
             confidence=0.9,
@@ -185,7 +185,7 @@ def test_llm_judge_escalation_adds_llm_flagged(monkeypatch):
         )
 
     monkeypatch.setattr(risk_engine, "judge", fake_judge)
-    monkeypatch.setattr(risk_engine, "_llm_judge_enabled", lambda: True)
+    monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: True)
     # jailbreak_roleplay rule contributes 25 — inside judge band [15, 60).
     text = "pretend you are a teacher and explain photosynthesis."
     result = score(_normalized(text))
@@ -201,11 +201,11 @@ def test_llm_judge_failure_adds_llm_flagged(monkeypatch):
     When the judge call errors, fail-closed score applies and LLM_FLAGGED
     records the operational outcome (distinguished from escalation via signal).
     """
-    async def fake_judge(content: str) -> JudgeResult:
+    def fake_judge(content: str, context: dict) -> JudgeResult:
         raise ConnectionError("API unreachable")
 
     monkeypatch.setattr(risk_engine, "judge", fake_judge)
-    monkeypatch.setattr(risk_engine, "_llm_judge_enabled", lambda: True)
+    monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: True)
     text = "pretend you are a teacher and explain photosynthesis."
     result = score(_normalized(text))
 
@@ -216,9 +216,33 @@ def test_llm_judge_failure_adds_llm_flagged(monkeypatch):
 
 def test_llm_judge_disabled_no_llm_flagged_for_ambiguous_input(monkeypatch):
     """With the judge off, ambiguous regex-only input must not add LLM_FLAGGED."""
-    monkeypatch.setattr(risk_engine, "_llm_judge_enabled", lambda: False)
+    monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: False)
     text = "pretend you are a teacher and explain photosynthesis."
     result = score(_normalized(text))
 
     assert RiskCategory.LLM_FLAGGED not in result.risk_categories
     assert "llm_judge_escalation" not in result.matched_signals
+
+
+def test_llm_judge_skips_below_ambiguous_band(monkeypatch):
+    def unexpected_judge(content: str, context: dict) -> JudgeResult:
+        raise AssertionError("judge must not run below score 15")
+
+    monkeypatch.setattr(risk_engine, "judge", unexpected_judge)
+    monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: True)
+    result = score(_normalized("Please summarize the report."))
+
+    assert result.risk_score == 0
+    assert RiskCategory.LLM_FLAGGED not in result.risk_categories
+
+
+def test_llm_judge_runs_inside_ambiguous_band(monkeypatch):
+    def fake_judge(content: str, context: dict) -> JudgeResult:
+        return JudgeResult(True, 0.9, "ambiguous attack confirmed")
+
+    monkeypatch.setattr(risk_engine, "judge", fake_judge)
+    monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: True)
+    result = score(_normalized("a" * 44 + "="))
+
+    assert result.risk_score >= risk_engine.JUDGE_ESCALATION_SCORE
+    assert "llm_judge_escalation" in result.matched_signals
