@@ -1,0 +1,19 @@
+{
+  "model": "jev-latest",
+  "questions": {
+    "is_request": {
+      "type": "noul",
+      "instructions": "Is the user asking the assistant to do something, rather than just chatting?"
+    },
+    "kind": {
+      "type": "choice",
+      "instructions": "What kind of request is this?",
+      "criteria": {
+        "summarize": "Ask to summarize or explain text",
+        "fetch": "Ask to open a URL or download something",
+        "write": "Ask to save a note or reminder",
+        "other": "Anything else"
+      }
+    }
+  }
+}
