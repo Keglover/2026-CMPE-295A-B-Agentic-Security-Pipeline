@@ -1,0 +1,5 @@
+{
+  "action_threshold": 0.7,
+  "review_threshold": 0.35,
+  "severity_block": 2.0
+}
