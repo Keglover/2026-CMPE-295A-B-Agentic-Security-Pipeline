@@ -1,0 +1,7 @@
+This is a simple file to discuss the purposes of the pyrit directory within this project.
+One of the dependencies within this project is the Microsoft spnosered, publically available
+python library PyRIT. This framework is useful for prompt injection attacks on LLM architectures,
+and is useful for mapping blind spots and holes within the pipeline and agents.
+
+That said, this is an ADAPTER that is being developed for the purposes of supporting and testing
+the pipeline, and should be treated and extended upon as such.
