@@ -6,8 +6,8 @@ from pyrit.executor.attack import AttackScoringConfig, PromptSendingAttack
 from pyrit.output import output_attack_async
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
-from evaluation.pyrit.scorer import compromise_scorer
-from evaluation.pyrit.target import AgentPipelineTarget
+from evaluation.pyrit.testing_files.test_scorer import compromise_scorer
+from evaluation.pyrit.testing_files.test_target import AgentPipelineTarget
 
 
 async def run() -> None:
