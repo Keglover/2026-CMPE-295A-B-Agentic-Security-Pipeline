@@ -191,9 +191,9 @@ def test_llm_judge_escalation_adds_llm_flagged(monkeypatch):
     result = score(_normalized(text))
 
     assert RiskCategory.LLM_FLAGGED in result.risk_categories
-    assert "llm_judge_escalation" in result.matched_signals
+    assert "jev_escalation" in result.matched_signals
     assert result.risk_score >= risk_engine.JUDGE_ESCALATION_SCORE
-    assert "LLM judge" in result.rationale
+    assert "JEV judge" in result.rationale
 
 
 def test_llm_judge_failure_adds_llm_flagged(monkeypatch):
@@ -205,12 +205,13 @@ def test_llm_judge_failure_adds_llm_flagged(monkeypatch):
         raise ConnectionError("API unreachable")
 
     monkeypatch.setattr(risk_engine, "judge", fake_judge)
+    monkeypatch.setattr(risk_engine, "fallback_judge", fake_judge)
     monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: True)
     text = "pretend you are a teacher and explain photosynthesis."
     result = score(_normalized(text))
 
     assert RiskCategory.LLM_FLAGGED in result.risk_categories
-    assert "llm_judge_failure" in result.matched_signals
+    assert "jev_failure" in result.matched_signals
     assert result.risk_score >= risk_engine.JUDGE_FAILURE_SCORE
 
 
@@ -221,7 +222,7 @@ def test_llm_judge_disabled_no_llm_flagged_for_ambiguous_input(monkeypatch):
     result = score(_normalized(text))
 
     assert RiskCategory.LLM_FLAGGED not in result.risk_categories
-    assert "llm_judge_escalation" not in result.matched_signals
+    assert "jev_escalation" not in result.matched_signals
 
 
 def test_llm_judge_skips_below_ambiguous_band(monkeypatch):
@@ -245,4 +246,20 @@ def test_llm_judge_runs_inside_ambiguous_band(monkeypatch):
     result = score(_normalized("a" * 44 + "="))
 
     assert result.risk_score >= risk_engine.JUDGE_ESCALATION_SCORE
-    assert "llm_judge_escalation" in result.matched_signals
+    assert "jev_escalation" in result.matched_signals
+
+
+def test_jev_failure_uses_llm_judge_fallback(monkeypatch):
+    def failing_jev(content: str, context: dict) -> JudgeResult:
+        raise ConnectionError("JEV unavailable")
+
+    def fallback_judge(content: str, context: dict) -> JudgeResult:
+        return JudgeResult(False, 0.9, "legacy fallback says benign", provider="ollama")
+
+    monkeypatch.setattr(risk_engine, "judge", failing_jev)
+    monkeypatch.setattr(risk_engine, "fallback_judge", fallback_judge)
+    monkeypatch.setattr(risk_engine, "llm_judge_enabled", lambda: True)
+    result = score(_normalized("pretend you are a teacher and explain photosynthesis."))
+
+    assert result.risk_score == 25
+    assert RiskCategory.LLM_FLAGGED not in result.risk_categories
