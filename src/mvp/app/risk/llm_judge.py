@@ -40,7 +40,7 @@ def environment_bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 def judge_config() -> dict[str, Any]:
-    """Build provider configuration without capturing environment at import time."""
+    #Build provider configuration without capturing environment at import time.
     try:
         timeout = float(os.getenv("LLM_JUDGE_TIMEOUT_SECONDS", str(JUDGE_TIMEOUT_SECONDS)))
     except ValueError as exc:
@@ -60,7 +60,7 @@ def judge_config() -> dict[str, Any]:
     }
 
 def validate_result(result: JudgeResult, provider: str, latency_ms: float = 0.0) -> JudgeResult:
-    """Validate and normalize provider output into the stable result contract."""
+    #Validate and normalize provider output into the stable result contract.
     confidence = float(result.confidence)
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("judge confidence must be between 0.0 and 1.0")
@@ -76,7 +76,7 @@ def validate_result(result: JudgeResult, provider: str, latency_ms: float = 0.0)
     )
 
 def parse_result(payload: Any, provider: str) -> JudgeResult:
-    """Parse and validate a provider JSON object."""
+    #Parse and validate a provider JSON object.
     if not isinstance(payload, dict):
         raise ValueError("judge response must be a JSON object")
     if "is_manipulation" not in payload or "confidence" not in payload:
@@ -99,7 +99,7 @@ local_model_path: str | None = None
 
 
 def load_local_model(model_path: str) -> Any:
-    """Load and cache the trained local classifier."""
+    #Load and cache the trained local classifier.
     global local_model, local_model_path
     try:
         import joblib
@@ -115,7 +115,7 @@ def load_local_model(model_path: str) -> Any:
 
 
 async def judge_local(content: str, settings: dict[str, Any]) -> JudgeResult:
-    """Run the trained local classifier."""
+    #Run the trained local classifier.
     threshold = settings["local_threshold"]
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("LOCAL_JUDGE_THRESHOLD must be between 0.0 and 1.0")
@@ -136,7 +136,7 @@ async def judge_local(content: str, settings: dict[str, Any]) -> JudgeResult:
     )
 
 async def judge_openai(content: str, context: dict[str, Any], settings: dict[str, Any]) -> JudgeResult:
-    """Classify content with OpenAI using a per-call lazy import."""
+    #Classify content with OpenAI using a per-call lazy import.
     try:
         from openai import AsyncOpenAI
     except ImportError as exc:
@@ -202,12 +202,7 @@ async def judge_ollama(content: str, context: dict[str, Any], settings: dict[str
     return parse_result(payload, "ollama")
 
 async def judge(content: str, context: dict[str, Any] | None = None) -> JudgeResult:
-    """Run the configured judge provider for one content item.
-
-    Provider failures are raised to the risk engine, which applies the
-    fail-closed score of 80. This keeps transport failures distinct from a
-    valid benign judgment.
-    """
+    #Run the configured judge provider asynchronously with a timeout.
     settings = judge_config()
     context = context or {}
     provider = settings["provider"]
@@ -227,7 +222,7 @@ async def judge(content: str, context: dict[str, Any] | None = None) -> JudgeRes
     return validate_result(result, result.provider, result.latency_ms)
 
 def run_judge_sync(content: str, context: dict[str, Any] | None = None) -> JudgeResult:
-    """Run the async judge from synchronous risk scoring."""
+    #Run the async judge from synchronous risk scoring.
     context = context or {}
     try:
         asyncio.get_running_loop()
@@ -237,5 +232,5 @@ def run_judge_sync(content: str, context: dict[str, Any] | None = None) -> Judge
         return pool.submit(asyncio.run, judge(content, context)).result()
 
 def provider_name() -> str:
-    """Return the configured provider mode for diagnostics and scenario output."""
+    #Return the configured provider mode for diagnostics and scenario output."""
     return judge_config()["provider"]

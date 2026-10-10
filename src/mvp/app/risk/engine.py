@@ -1,21 +1,11 @@
 """
 Risk Engine module.
-
-Responsibility: Analyse normalized text and produce a structured risk score
-(0-100), one or more attack categories, the matched signals, and a plain-
-English rationale.
-
-Design: Rules-first for MVP (fast, deterministic, transparent).
-An ML classifier extension point is left in place for Sprint 2+.
-
 The four regex attack families covered:
   - INSTRUCTION_OVERRIDE  — attempts to replace the agent's system prompt
   - DATA_EXFILTRATION     — attempts to leak data out of the agent's context
   - TOOL_COERCION         — attempts to force specific tool calls
   - OBFUSCATION           — encoding tricks that hide the above
 
-Additionally, LLM_FLAGGED records a positive or fail-closed verdict from the
-optional LLM judge (matched_signals distinguish escalation vs failure).
 """
 
 from __future__ import annotations
@@ -128,11 +118,7 @@ def cap_score(raw: int) -> int:
 
 
 def match_rules(text: str) -> tuple[int, list[str], dict[RiskCategory, int]]:
-    """
-    Run the regex rules against the text and accumulate a risk score.
-    Returns:
-        tuple: (capped risk_score, matched_signals list, detected_categories dict)
-    """
+    # Match the input text against all regex rules and return the cumulative score, matched signals, and detected categories.
     risk_score = 0
     matched_signals: list[str] = []
     detected_categories: dict[RiskCategory, int] = {}
@@ -154,10 +140,7 @@ def apply_judge(
     matched_signals: list[str],
     detected_categories: dict[RiskCategory, int],
 ) -> tuple[int, list[str], dict[RiskCategory, int], object]:
-    """
-    If the risk score is in the configured band, call the LLM judge and
-    potentially escalate the score and add a matched signal.
-    """
+    #If the risk score is in the configured band, call the LLM judge and apply its result to the risk score and categories.
     judge_result = None
 
     if not (
@@ -210,9 +193,6 @@ def build_result(
     detected_categories: dict[RiskCategory, int],
     judge_result: object,
 ) -> RiskResult:
-    """
-    Build a RiskResult from the accumulated state.
-    """
     if not detected_categories:
         categories: list[RiskCategory] = [RiskCategory.BENIGN]
         rationale = "No attack signals detected. Input appears safe."
@@ -248,15 +228,7 @@ def build_result(
 
 
 def score(normalized: NormalizedInput) -> RiskResult:
-    """
-    Run the full risk assessment pipeline on normalized text.
-
-    Args:
-        normalized (NormalizedInput): Output from the normalize stage.
-
-    Returns:
-        RiskResult: Structured risk assessment ready for the policy engine.
-    """
+    #Score the normalized input and return a RiskResult.
     text = normalized.normalized_content or ""
 
     if not text.strip():

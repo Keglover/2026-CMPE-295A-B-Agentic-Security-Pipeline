@@ -9,13 +9,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from app.ingest.normalizer import normalize
 from app.models import PipelineRequest, SourceType
 from app.policy.engine import decide
 from app.risk.engine import score
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_arguments() -> argparse.Namespace:
