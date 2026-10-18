@@ -13,8 +13,11 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from logging import getLogger
+from typing import Callable
 
 from app.models import NormalizedInput, RiskCategory, RiskResult
+from app.risk.llm_judge import JudgeResult
 
 try:
     from app.risk.jev import run_jev_sync
@@ -28,11 +31,15 @@ except ModuleNotFoundError:
 
 judge = run_jev_sync
 fallback_judge = run_judge_sync
+_log = getLogger(__name__)
+Judge = Callable[[str, dict[str, object]], JudgeResult]
 
 
 def llm_judge_enabled() -> bool:
     """Read the LLM judge toggle at call time so CLI runs can flip it safely."""
-    return os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
+    return os.getenv("LLM_JUDGE_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +49,6 @@ def llm_judge_enabled() -> bool:
 
 @dataclass
 class Rule:
-    """
-    A single regex rule for detecting prompt injection.
-    """
-
     name: str
     pattern: re.Pattern[str]
     category: RiskCategory
@@ -68,8 +71,10 @@ JUDGE_FAILURE_SCORE: int = 80
 
 def build_rules(category: RiskCategory, *specs: tuple[str, str, int]) -> list[Rule]:
     """Build rules from compact (name, pattern, score) specifications."""
-    return [Rule(name, re.compile(pattern, _FLAGS), category, score)
-          for name, pattern, score in specs]
+    return [
+        Rule(name, re.compile(pattern, _FLAGS), category, score)
+        for name, pattern, score in specs
+    ]
 
 
 RULES: list[Rule] = sum([
@@ -113,13 +118,10 @@ RULES: list[Rule] = sum([
 
 
 def cap_score(raw: int) -> int:
-    """Clamp score to the 0-100 range."""
     return max(0, min(100, raw))
 
 
 def match_rules(text: str) -> tuple[int, list[str], dict[RiskCategory, int]]:
-    # Match the input text against all regex rules and return the cumulative score, matched signals, and detected categories.
-    risk_score = 0
     matched_signals: list[str] = []
     detected_categories: dict[RiskCategory, int] = {}
 
@@ -139,9 +141,8 @@ def apply_judge(
     risk_score: int,
     matched_signals: list[str],
     detected_categories: dict[RiskCategory, int],
-) -> tuple[int, list[str], dict[RiskCategory, int], object]:
-    #If the risk score is in the configured band, call the LLM judge and apply its result to the risk score and categories.
-    judge_result = None
+) -> tuple[int, list[str], dict[RiskCategory, int], JudgeResult | None]:
+    judge_result: JudgeResult | None = None
 
     if not (
         llm_judge_enabled()
@@ -157,10 +158,15 @@ def apply_judge(
         }
         try:
             judge_result = judge(text, judge_context)
-        except Exception:
+        except Exception as exc:
+            _log.warning("Primary risk judge failed; trying fallback: %s", exc)
             if not fallback_judge:
                 raise
-            judge_result = fallback_judge(text, judge_context)
+            try:
+                judge_result = fallback_judge(text, judge_context)
+            except Exception:
+                _log.exception("Fallback risk judge failed")
+                raise
 
         if (
             judge_result
@@ -182,6 +188,7 @@ def apply_judge(
             detected_categories.get(RiskCategory.LLM_FLAGGED, 0)
             + JUDGE_FAILURE_SCORE
         )
+        _log.exception("Risk judge failed; applying fail-closed score")
 
     return risk_score, matched_signals, detected_categories, judge_result
 
@@ -191,7 +198,7 @@ def build_result(
     risk_score: int,
     matched_signals: list[str],
     detected_categories: dict[RiskCategory, int],
-    judge_result: object,
+    judge_result: JudgeResult | None,
 ) -> RiskResult:
     if not detected_categories:
         categories: list[RiskCategory] = [RiskCategory.BENIGN]
@@ -228,7 +235,7 @@ def build_result(
 
 
 def score(normalized: NormalizedInput) -> RiskResult:
-    #Score the normalized input and return a RiskResult.
+    """Score normalized input using deterministic rules and optional judging."""
     text = normalized.normalized_content or ""
 
     if not text.strip():

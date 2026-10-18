@@ -32,6 +32,8 @@ TODO List (from Project Plan):
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 from app.models import PolicyAction, PolicyResult, RiskCategory, RiskResult
 from app.policy.config_loader import load_policy_config
@@ -43,31 +45,91 @@ _log = logging.getLogger("policy_engine")
 # Falls back to hardcoded defaults if the YAML file is missing.
 # ---------------------------------------------------------------------------
 
-_config = load_policy_config()
-_thresholds = _config.get("thresholds", {})
+@dataclass(frozen=True)
+class PolicyConfig:
+    """Validated immutable policy settings used by the pure decision function."""
 
-BLOCK_THRESHOLD: int = _thresholds.get("block", 80)
-QUARANTINE_THRESHOLD: int = _thresholds.get("quarantine", 60)
-APPROVAL_THRESHOLD: int = _thresholds.get("require_approval", 35)
-SANITIZE_THRESHOLD: int = _thresholds.get("sanitize", 15)
+    block: int
+    quarantine: int
+    approval: int
+    sanitize: int
+    high_attention_categories: frozenset[RiskCategory]
+    high_attention_min_score: int
+    fail_closed_action: str
+    fail_closed_reason: str
+    version: str
+
+
+def _threshold(config: dict[str, Any], name: str, default: int) -> int:
+    value = config.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+        raise ValueError(f"policy threshold {name!r} must be an integer from 0 to 100")
+    return value
+
+
+def _load_config() -> PolicyConfig:
+    config = load_policy_config()
+    thresholds = config.get("thresholds", {})
+    if not isinstance(thresholds, dict):
+        raise ValueError("policy thresholds must be a mapping")
+    block = _threshold(thresholds, "block", 80)
+    quarantine = _threshold(thresholds, "quarantine", 60)
+    approval = _threshold(thresholds, "require_approval", 35)
+    sanitize = _threshold(thresholds, "sanitize", 15)
+    if not block >= quarantine >= approval >= sanitize:
+        raise ValueError("policy thresholds must descend: block >= quarantine >= approval >= sanitize")
+
+    configured_categories = config.get(
+        "high_attention_categories", ["TOOL_COERCION", "DATA_EXFILTRATION"]
+    )
+    if not isinstance(configured_categories, list):
+        raise ValueError("high_attention_categories must be a list")
+    categories = frozenset(
+        RiskCategory(name)
+        for name in configured_categories
+        if name in RiskCategory.__members__
+    )
+    minimum = _threshold(
+        config, "high_attention_min_score", sanitize
+    )
+    fail_closed = config.get("fail_closed", {})
+    if not isinstance(fail_closed, dict):
+        raise ValueError("fail_closed policy settings must be a mapping")
+    return PolicyConfig(
+        block=block,
+        quarantine=quarantine,
+        approval=approval,
+        sanitize=sanitize,
+        high_attention_categories=categories,
+        high_attention_min_score=minimum,
+        fail_closed_action=str(fail_closed.get("default_action", "BLOCK")),
+        fail_closed_reason=str(
+            fail_closed.get(
+                "default_reason", "Risk Engine unreachable — fail-closed to BLOCK"
+            )
+        ),
+        version=str(config.get("version", "unknown")),
+    )
+
+
+_policy_config = _load_config()
+
+BLOCK_THRESHOLD = _policy_config.block
+QUARANTINE_THRESHOLD = _policy_config.quarantine
+APPROVAL_THRESHOLD = _policy_config.approval
+SANITIZE_THRESHOLD = _policy_config.sanitize
 
 # Categories that warrant human approval even at lower score
-_ha_cats = _config.get("high_attention_categories", ["TOOL_COERCION", "DATA_EXFILTRATION"])
-HIGH_ATTENTION_CATEGORIES: set[RiskCategory] = {
-    RiskCategory(c) for c in _ha_cats if c in RiskCategory.__members__
-}
+HIGH_ATTENTION_CATEGORIES = _policy_config.high_attention_categories
 
 # Minimum score for high-attention override to activate
-_HIGH_ATTENTION_MIN_SCORE: int = _config.get("high_attention_min_score", SANITIZE_THRESHOLD)
+_HIGH_ATTENTION_MIN_SCORE = _policy_config.high_attention_min_score
 
 # Fail-closed defaults (used by main.py when risk engine is unreachable)
-_fail_closed = _config.get("fail_closed", {})
-FAIL_CLOSED_ACTION: str = _fail_closed.get("default_action", "BLOCK")
-FAIL_CLOSED_REASON: str = _fail_closed.get(
-    "default_reason", "Risk Engine unreachable — fail-closed to BLOCK"
-)
+FAIL_CLOSED_ACTION = _policy_config.fail_closed_action
+FAIL_CLOSED_REASON = _policy_config.fail_closed_reason
 
-POLICY_VERSION: str = str(_config.get("version", "unknown"))
+POLICY_VERSION = _policy_config.version
 
 _log.info(
     "Policy config loaded (v%s): BLOCK>=%d QUARANTINE>=%d APPROVAL>=%d SANITIZE>=%d",
@@ -90,13 +152,15 @@ def decide(risk: RiskResult) -> PolicyResult:
     categories = set(risk.risk_categories)
 
     # --- Hard block for very high risk ---
+    categories_text = ", ".join(category.value for category in risk.risk_categories)
+
     if score >= BLOCK_THRESHOLD:
         return PolicyResult(
             request_id=risk.request_id,
             policy_action=PolicyAction.BLOCK,
             policy_reason=(
                 f"Risk score {score} exceeds BLOCK threshold ({BLOCK_THRESHOLD}). "
-                f"Categories: {[c.value for c in risk.risk_categories]}."
+                f"Categories: {categories_text or 'none'}."
             ),
             requires_approval=False,
         )
@@ -122,7 +186,7 @@ def decide(risk: RiskResult) -> PolicyResult:
             policy_action=PolicyAction.REQUIRE_APPROVAL,
             policy_reason=(
                 f"Risk score {score} or high-attention category detected "
-                f"({[c.value for c in risk.risk_categories]}). "
+                f"({categories_text or 'none'}). "
                 f"Human approval required before execution."
             ),
             requires_approval=True,
