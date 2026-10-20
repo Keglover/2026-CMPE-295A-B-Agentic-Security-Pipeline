@@ -74,7 +74,7 @@ def build_campaign() -> list[AttackCase]:
     for real secrets or invoke external systems.
     """
 
-    dir_path = "/campaign_scenarios"
+    dir_path = os.path.abspath(__file__ + "/../campaign_scenarios")
 
     loaded_scenarios = []
 
@@ -99,9 +99,6 @@ def build_campaign() -> list[AttackCase]:
         except Exception as e:
             _log.error("Failed to load scenario %s: %s", scenario_file, e)
             continue
-
-    for attack_case in loaded_scenarios:
-        yield attack_case
 
     return loaded_scenarios
 
@@ -145,17 +142,18 @@ def run_direct(cases: list[AttackCase], endpoint: str) -> list[CampaignResult]:
                 data = response.json()
                 results.append(
                     CampaignResult(
-                        case.case_id,
-                        case.family,
+                        case.attempt_id,
+                        case.scenario_type,
                         "direct",
                         case.payload,
-                        data,
-                        attack_succeeded(data, case.success_criteria),
+                        None, 
+                        None,
+                        str(exec),
                     )
                 )
             except (httpx.HTTPError, ValueError) as exc:
                 results.append(
-                    CampaignResult(case.case_id, case.family, "direct", case.payload, None, None, str(exc))
+                    CampaignResult(case.attempt_id, case.scenario_type, "direct", case.payload, None, None, str(exc))
                 )
     return results
 
@@ -222,8 +220,8 @@ async def run_pyrit(cases: list[AttackCase], endpoint: str) -> list[CampaignResu
             rendered_result = str(attack_result)
             results.append(
                 CampaignResult(
-                    case.case_id,
-                    case.family,
+                    case.attempt_id,
+                    case.scenario_type,
                     "pyrit",
                     case.payload,
                     {"pyrit_result": rendered_result},
@@ -234,7 +232,7 @@ async def run_pyrit(cases: list[AttackCase], endpoint: str) -> list[CampaignResu
                 )
             )
         except Exception as exc:  # campaign should report a failed case, not hide it
-            results.append(CampaignResult(case.case_id, case.family, "pyrit", case.payload, None, None, str(exc)))
+            results.append(CampaignResult(case.attempt_id, case.scenario_type, "pyrit", case.payload, None, None, str(exc)))
     return results
 
 
@@ -242,7 +240,7 @@ def write_report(results: list[CampaignResult]) -> Path:
     """Write a timestamped JSON report and return its path."""
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d|%H:%M:%S_UTC")
     path = RESULTS_DIR / f"pyrit_campaign_{timestamp}.json"
     successes = sum(result.attack_success is True for result in results)
     report = {
