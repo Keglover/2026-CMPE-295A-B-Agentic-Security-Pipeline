@@ -60,6 +60,7 @@ class CampaignResult:
     attempt_id: str
     scenario_type: str
     objective: str
+    mode: str
     payload: str
     response: dict[str, Any] | None
     attack_success: bool | None
@@ -128,6 +129,7 @@ def run_direct(cases: list[AttackCase], endpoint: str) -> list[CampaignResult]:
     """Run the corpus directly against the local HTTP target."""
 
     results: list[CampaignResult] = []
+
     with httpx.Client(timeout=20.0) as client:
         for case in cases:
             request = {
@@ -138,22 +140,46 @@ def run_direct(cases: list[AttackCase], endpoint: str) -> list[CampaignResult]:
             }
             try:
                 response = client.post(endpoint, json=request)
+
+                '''
+                _log.info(
+                    "Attempt %s returned HTTP %s: %s",
+                    case.attempt_id,
+                    response.status_code,
+                    response.text,
+                )
+                '''
+                data = response.json()
+                success = attack_succeeded(data, case.success_criteria)
+
                 response.raise_for_status()
                 data = response.json()
                 results.append(
                     CampaignResult(
-                        case.attempt_id,
-                        case.scenario_type,
-                        "direct",
-                        case.payload,
-                        None, 
-                        None,
-                        str(exec),
+                        attempt_id=case.attempt_id,
+                        scenario_type=case.scenario_type,
+                        objective=case.objective,
+                        mode="direct",
+                        payload=case.payload,
+                        response=data,
+                        attack_success=success,
+                        error=None,
                     )
                 )
-            except (httpx.HTTPError, ValueError) as exc:
+            except Exception as exc:
+                _log.exception("Failed while processing attempt %s", case.attempt_id)
+                
                 results.append(
-                    CampaignResult(case.attempt_id, case.scenario_type, "direct", case.payload, None, None, str(exc))
+                    CampaignResult(
+                        attempt_id=case.attempt_id,
+                        scenario_type=case.scenario_type,
+                        objective=case.objective,
+                        mode="direct",
+                        payload=case.payload,
+                        response=None,
+                        attack_success=None,
+                        error=f"{type(exc).__name__}: {exc!r}",
+                    )
                 )
     return results
 
@@ -220,19 +246,29 @@ async def run_pyrit(cases: list[AttackCase], endpoint: str) -> list[CampaignResu
             rendered_result = str(attack_result)
             results.append(
                 CampaignResult(
-                    case.attempt_id,
-                    case.scenario_type,
-                    "pyrit",
-                    case.payload,
-                    {"pyrit_result": rendered_result},
+                    attempt_id=case.attempt_id,
+                    scenario_type=case.scenario_type,
+                    objective=target,
+                    mode="pyrit",
+                    payload=case.payload,
+                    response={"pyrit_result": rendered_result},
                     # HTTPTarget returns the pipeline summary in the target
                     # transcript. This is the PyRIT-mode equivalent of the
                     # structured direct-mode oracle.
-                    "Gateway: EXECUTED" in rendered_result,
+                    attack_success="Gateway: EXECUTED" in rendered_result,
                 )
             )
         except Exception as exc:  # campaign should report a failed case, not hide it
-            results.append(CampaignResult(case.attempt_id, case.scenario_type, "pyrit", case.payload, None, None, str(exc)))
+            results.append(
+                CampaignResult(
+                    attempt_id=case.attempt_id, 
+                    scenario_type=case.scenario_type, 
+                    objective=target,  
+                    mode="pyrit", 
+                    payload=case.payload, 
+                    response=None, 
+                    success=None, 
+                    error=str(exc)))
     return results
 
 
@@ -240,7 +276,7 @@ def write_report(results: list[CampaignResult]) -> Path:
     """Write a timestamped JSON report and return its path."""
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d|%H:%M:%S_UTC")
+    timestamp = datetime.now(timezone.utc).strftime("D_%Y-%m-%d_T_%H-%M-%S_UTC")
     path = RESULTS_DIR / f"pyrit_campaign_{timestamp}.json"
     successes = sum(result.attack_success is True for result in results)
     report = {
