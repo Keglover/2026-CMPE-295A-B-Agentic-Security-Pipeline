@@ -1,3 +1,8 @@
+> The previous gateway backend is retained under `src/mvp/`. The standalone
+> Promptrail CLI/authentication work is documented in [CLI_README.md](CLI_README.md)
+> and [how_to_run.md](how_to_run.md). Its authentication service on port 8003 is
+> separate from the legacy pipeline; the CLI currently provides authentication only.
+
 # Agentic Security Pipeline
 
 Policy-mediated security for tool-using LLM agents.
