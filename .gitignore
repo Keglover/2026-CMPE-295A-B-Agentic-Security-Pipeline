@@ -37,3 +37,34 @@ test.txt
 # gVisor setup — API key must never be committed
 gvisor/ollama.env
 
+# Standalone CLI/auth credentials and local release state
+# Generated Python/package artifacts
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.DS_Store
+.vscode/
+.worktrees/
+
+# Private configuration, credentials and runtime state
+.env
+.env.*
+/.runtime/
+/auth/.runtime/
+/auth/README.local.md
+*.lock
+
+# Retained local historical material that was never a release asset
+/sandbox/
+/tracker/
+/Notes and Research/
+/Notes and Research.zip
+/history/TODO.md
+/test.txt
+/Research
+/PROMPTRAIL_GATEWAY_PLAN.md
+/history
