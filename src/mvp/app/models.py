@@ -86,6 +86,14 @@ class PipelineRequest(BaseModel):
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique request identifier",
     )
+    agent_id: str | None = Field(
+        default=None,
+        description="Identifier of the calling agent; defaults to anonymous if omitted",
+    )
+    approved_domains: list[str] = Field(
+        default_factory=list,
+        description="User-approved domains allowed for this request execution",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +171,38 @@ class GatewayResult(BaseModel):
     tool_output: Any | None = None
 
 
+class DomainValidationResult(BaseModel):
+    """
+    Result for a single URL found in tool arguments.
+
+    is_allowed means the hostname is in the static allowlist.
+    is_approved means execution may proceed for this hostname for this request.
+    """
+
+    arg_name: str
+    url: str
+    hostname: str
+    is_allowed: bool
+    is_approved: bool
+    warning: str | None = None
+
+
+class ValidateUrlsRequest(BaseModel):
+    """Request body for the /validate-urls pre-flight endpoint."""
+
+    proposed_tool: str | None = None
+    tool_args: dict[str, Any] | None = None
+    approved_domains: list[str] = Field(default_factory=list)
+
+
+class ValidateUrlsResponse(BaseModel):
+    """Response body for URL pre-flight validation."""
+
+    urls: list[DomainValidationResult] = Field(default_factory=list)
+    blocked_count: int = 0
+    can_proceed: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Full pipeline response — the top-level API response
 # ---------------------------------------------------------------------------
@@ -181,7 +221,43 @@ class PipelineResponse(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc)
     )
     normalized: NormalizedInput
+    prompt_guard: PromptGuardResult | None = None
     risk: RiskResult
     policy: PolicyResult
     gateway: GatewayResult | None = None
+    domain_validation: list[DomainValidationResult] = Field(default_factory=list)
+    sanitization_applied: bool = False
+    pii_found: list[str] = Field(default_factory=list)
     summary: str = ""
+
+
+class PlannerRequest(BaseModel):
+    """
+    Input to the planner.
+    """
+    task_description: str
+    available_tools: dict[str, dict]
+    risk_score: int
+    policy_action: PolicyAction
+    request_id: str
+
+
+class PlannerResponse(BaseModel):
+    """
+    Output from the planner.
+    """
+    tool_name: str
+    tool_args: dict[str, Any]
+    rationale: str
+    request_id: str
+
+
+class PromptGuardResult(BaseModel):
+    """
+    Output of the Prompt Guard pre-processor.
+    """
+    request_id: str
+    is_injection: bool
+    confidence: float
+    injection_type: str | None = None
+    rationale: str

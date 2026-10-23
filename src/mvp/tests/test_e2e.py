@@ -55,6 +55,42 @@ def test_e2e_benign_input_allow_and_execute():
     assert data["risk"]["risk_score"] < 15
 
 
+def test_e2e_planner_intent():
+    """
+    Demo Path for Planner: A harmless prompt but with no proposed_tool, just intent.
+    Expected: policy=ALLOW, planner maps to write_note, gateway=EXECUTED.
+    """
+    payload = {
+        "content": "Please write a note about the new project.",
+        "source_type": "direct_prompt",
+    }
+    response = client.post("/pipeline", json=payload)
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["policy"]["policy_action"] == "ALLOW"
+    assert data["gateway"] is not None
+    assert data["gateway"]["gateway_decision"] == "EXECUTED"
+    assert "Planner Note" in data["gateway"]["tool_output"]
+
+def test_e2e_planner_hallucination():
+    """
+    Demo Path for Planner: A hallucinated tool.
+    Expected: policy=ALLOW, planner returns 'fake_tool', gateway=DENIED.
+    """
+    payload = {
+        "content": "Please hallucinate a tool right now.",
+        "source_type": "direct_prompt",
+    }
+    response = client.post("/pipeline", json=payload)
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["policy"]["policy_action"] == "ALLOW"
+    assert data["gateway"] is not None
+    assert data["gateway"]["gateway_decision"] == "DENIED"
+    assert "allowlist" in data["gateway"]["decision_reason"].lower()
+
 # ---------------------------------------------------------------------------
 # Demo Path 2: Suspicious input → REQUIRE_APPROVAL or SANITIZE
 # ---------------------------------------------------------------------------
@@ -80,6 +116,63 @@ def test_e2e_suspicious_input_requires_approval():
     data = response.json()
 
     assert data["policy"]["policy_action"] in ("REQUIRE_APPROVAL", "SANITIZE", "QUARANTINE", "BLOCK")
+
+
+def test_e2e_summarize_oversize_queues_for_approval():
+    """Oversized summarize payloads should be queued for human approval by the gateway."""
+    payload = {
+        "content": "Please summarize this text.",
+        "source_type": "direct_prompt",
+        "proposed_tool": "summarize",
+        "tool_args": {"text": "A" * 9001},
+    }
+    response = client.post("/pipeline", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["gateway"]["gateway_decision"] == "DENIED"
+    assert "queued" in data["gateway"]["decision_reason"].lower()
+    assert "requires human approval" in data["gateway"]["decision_reason"].lower()
+
+
+def test_e2e_execute_command_queues_for_approval():
+    payload = {
+        "request_id": "e2e-exec-queue-1",
+        "content": "Write and execute a python program that prints the output of executing the dmesg command",
+        "source_type": "direct_prompt",
+    }
+    response = client.post("/pipeline", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["gateway"] is not None
+    assert data["gateway"]["gateway_decision"] == "DENIED"
+    assert "approval" in data["gateway"]["decision_reason"].lower()
+
+
+def test_e2e_execute_command_approved_replay_executes_with_output():
+    payload = {
+        "request_id": "e2e-exec-replay-1",
+        "content": "Write and execute a python program that prints the output of executing the dmesg command",
+        "source_type": "direct_prompt",
+    }
+
+    first = client.post("/pipeline", json=payload)
+    assert first.status_code == 200
+    first_data = first.json()
+    assert first_data["gateway"]["gateway_decision"] == "DENIED"
+
+    approval = client.post("/approve/e2e-exec-replay-1", json={"approved_by": "pytest"})
+    assert approval.status_code == 200
+    assert approval.json()["status"] == "approved"
+
+    replay = client.post("/pipeline", json=payload)
+    assert replay.status_code == 200
+    replay_data = replay.json()
+    assert replay_data["gateway"]["gateway_decision"] == "EXECUTED"
+    assert replay_data["gateway"]["tool_output"]
 
 
 # ---------------------------------------------------------------------------

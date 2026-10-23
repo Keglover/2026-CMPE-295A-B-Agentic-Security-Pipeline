@@ -1,0 +1,18 @@
+{
+  "name": "03 Validate URLs - Allowed Domain",
+  "method": "POST",
+  "url": "{{baseUrl}}/validate-urls",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "tool": "fetch_url",
+    "args": {
+      "url": "https://example.com"
+    }
+  },
+  "expected": {
+    "status": 200,
+    "response_keys": ["urls", "blocked_count", "can_proceed"]
+  }
+}

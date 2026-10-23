@@ -1,42 +1,70 @@
-# Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+.venv/
+.env
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+audit_logs/*.ndjson
+.DS_Store
+
+# Local worktree metadata/artifacts
+.worktrees/
+
+# Runtime artifacts (MVP)
+src/mvp/audit_logs/*.ndjson
+src/mvp/sandbox/notes/*
+!src/mvp/sandbox/notes/.gitkeep
+sandbox/notes/*
+!sandbox/notes/.gitkeep
+
+# Project-specific exclusions
+tracker/
+Notes and Research/
+Notes and Research.zip
+/sandbox/
+!/app/sandbox/
+test_payload.json
+.vscode/
+scripts/README.md
+to-do.txt
+pre-prod.md
+TODO.md
+test.txt
+
+# gVisor setup — API key must never be committed
+gvisor/ollama.env
+
+# Standalone CLI/auth credentials and local release state
+# Generated Python/package artifacts
+__pycache__/
+*.py[cod]
 .venv/
-venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.DS_Store
+.vscode/
+.worktrees/
+
+# Private configuration, credentials and runtime state
 .env
 .env.*
-!.env.example
+/.runtime/
+/auth/.runtime/
+/auth/README.local.md
+*.lock
 
-# Logs
-*.log
-*.ndjson
-
-# macOS
-.DS_Store
-._*
-
-# Editor / IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Secrets
-*.pem
-*.key
-credentials.json
-secrets.json
-
-# Pytest
-.pytest_cache/
-
-# Jupyter
-.ipynb_checkpoints/
-
-
-# PDFs
-*.docx.pdf
+# Retained local historical material that was never a release asset
+/sandbox/
+/tracker/
+/Notes and Research/
+/Notes and Research.zip
+/history/TODO.md
+/test.txt
+/Research
+/PROMPTRAIL_GATEWAY_PLAN.md
+/history

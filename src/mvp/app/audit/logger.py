@@ -1,6 +1,8 @@
 """
 Audit / Telemetry module.
 
+Project Plan Ref: Section 13.1 (Cross-Cutting: Audit & Observability)
+
 Responsibility: Persist a structured decision trace for every pipeline run.
 Every request that flows through the pipeline gets one log entry containing:
   - request_id and timestamp
@@ -12,6 +14,13 @@ Every request that flows through the pipeline gets one log entry containing:
 
 Logs are written as newline-delimited JSON (NDJSON) to audit_logs/audit.ndjson.
 This makes them easy to grep, import into pandas, or ingest into a SIEM.
+
+TODO List (from Project Plan):
+    - [ ] Task 4.19 — Implement GET /history endpoint for log queries
+    - [ ] Task 4.14 — Record approval decisions in audit trail
+    - [ ] Task 7.11 — Verify audit log integrity (append-only, no tampering)
+    - [ ] Add log rotation for production deployments
+    - [ ] Add structured query support (filter by action, date, tool)
 """
 
 from __future__ import annotations
@@ -66,6 +75,7 @@ def record(
     """
     entry: dict = {
         "request_id": request.request_id,
+        "agent_id": request.agent_id or "anonymous",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source_type": request.source_type.value,
         "content_hash": _sha256_prefix(request.content),
@@ -77,6 +87,11 @@ def record(
         "requires_approval": policy.requires_approval,
         "gateway_decision": gateway.gateway_decision.value if gateway else None,
         "gateway_reason": gateway.decision_reason if gateway else None,
+        "rate_limited": (
+            gateway is not None
+            and gateway.gateway_decision.value == "DENIED"
+            and "rate limit exceeded" in gateway.decision_reason.lower()
+        ),
     }
 
     # Ensure the log directory exists
@@ -85,7 +100,7 @@ def record(
     # Append as a single line of JSON
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
-    
+
     _log.info(
         "AUDIT request_id=%s action=%s score=%d gateway=%s",
         entry["request_id"],
