@@ -1,0 +1,187 @@
+{
+  "realm": "jev",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "accessTokenLifespan": 300,
+  "oauth2DeviceCodeLifespan": 600,
+  "oauth2DevicePollingInterval": 5,
+  "roles": {
+    "realm": [
+      {
+        "name": "jev:evaluate"
+      },
+      {
+        "name": "jev:tools:call"
+      },
+      {
+        "name": "jev:approvals:write"
+      },
+      {
+        "name": "jev:audit:read"
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "jev:evaluate",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "jev:tools:call",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "jev:approvals:write",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "jev:audit:read",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "jev-gateway",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    },
+    {
+      "clientId": "jev-cli",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "jev:evaluate"
+      ],
+      "optionalClientScopes": [
+        "jev:tools:call",
+        "jev:approvals:write",
+        "jev:audit:read"
+      ],
+      "protocolMappers": [
+        {
+          "name": "subject-identifier",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "gateway-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jev-gateway",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "assigned-realm-permissions",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "jev-dev",
+      "enabled": true,
+      "firstName": "Jev",
+      "lastName": "Developer",
+      "email": "jev-dev@example.test",
+      "emailVerified": true,
+      "requiredActions": [],
+      "realmRoles": [
+        "jev:evaluate"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${JEV_DEV_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "jev-agent-dev",
+      "enabled": true,
+      "firstName": "Jev",
+      "lastName": "Development",
+      "email": "jev-agent-dev@example.test",
+      "emailVerified": true,
+      "requiredActions": [],
+      "realmRoles": [
+        "jev:evaluate",
+        "jev:tools:call"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${JEV_AGENT_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "jev-reviewer-dev",
+      "enabled": true,
+      "firstName": "Jev",
+      "lastName": "Development",
+      "email": "jev-reviewer-dev@example.test",
+      "emailVerified": true,
+      "requiredActions": [],
+      "realmRoles": [
+        "jev:evaluate",
+        "jev:approvals:write"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${JEV_REVIEWER_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

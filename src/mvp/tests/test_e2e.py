@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.gateway import gateway
 
 client = TestClient(app)
 
@@ -118,8 +119,10 @@ def test_e2e_suspicious_input_requires_approval():
     assert data["policy"]["policy_action"] in ("REQUIRE_APPROVAL", "SANITIZE", "QUARANTINE", "BLOCK")
 
 
-def test_e2e_summarize_oversize_queues_for_approval():
-    """Oversized summarize payloads should be queued for human approval by the gateway."""
+def test_e2e_summarize_oversize_queues_when_gate_enabled(monkeypatch):
+    """Exercise the optional approval gate without contradicting registry defaults."""
+    monkeypatch.setattr(gateway, "_SUMMARIZE_LOCAL_MAX_CHARS", 8000)
+    monkeypatch.setattr(gateway, "_SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL", True)
     payload = {
         "content": "Please summarize this text.",
         "source_type": "direct_prompt",

@@ -14,12 +14,24 @@ from fastapi.testclient import TestClient
 
 from app.gateway import gateway_real
 from app.sandbox import service
+from app.auth.capabilities import issue_runner
+from app.models import PipelineRequest, PolicyAction, PolicyResult
+from tests.test_runner_capabilities import keys
 
 
-client = TestClient(service.app)
+class AuthorizedTestClient(TestClient):
+    def post(self, path, *, json, **kwargs):
+        request = PipelineRequest(content="Authorized test action", proposed_tool=path.split("/")[-1],
+                                  tool_args=json["tool_args"], agent_id="test-owner")
+        policy = PolicyResult(request_id=request.request_id, policy_action=PolicyAction.ALLOW, policy_reason="test")
+        token = issue_runner(request, policy, request.request_id)
+        return super().post(path, json=json, headers={"Authorization": "Bearer " + token}, **kwargs)
+
+
+client = AuthorizedTestClient(service.app)
 
 @pytest.fixture(autouse=True)
-def mock_docker(monkeypatch):
+def mock_docker(monkeypatch, keys):
     """Mock the docker Python SDK globally for all tests."""
     mock_client = MagicMock()
     mock_containers = MagicMock()
@@ -84,8 +96,9 @@ def test_write_note_path_traversal_is_rejected(tmp_path: Path, monkeypatch: pyte
         json={"tool_args": {"title": "../escape", "body": "nope"}},
     )
 
-    assert response.status_code == 400
-    assert "invalid characters" in response.json()["detail"].lower() or "path traversal" in response.json()["detail"].lower()
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CAPABILITY_ACTION_MISMATCH"
+    mock_docker.containers.run.assert_not_called()
 
 
 def test_fetch_private_ip_is_rejected(monkeypatch: pytest.MonkeyPatch, mock_docker) -> None:
@@ -94,8 +107,9 @@ def test_fetch_private_ip_is_rejected(monkeypatch: pytest.MonkeyPatch, mock_dock
         json={"tool_args": {"url": "http://127.0.0.1/admin"}},
     )
 
-    assert response.status_code == 400
-    assert "private/internal" in response.json()["detail"].lower()
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CAPABILITY_ACTION_MISMATCH"
+    mock_docker.containers.run.assert_not_called()
 
 
 def test_hanging_executor_times_out(monkeypatch: pytest.MonkeyPatch, mock_docker) -> None:
@@ -202,7 +216,9 @@ def test_write_note_uses_and_cleans_job_scratch_dir(
     monkeypatch: pytest.MonkeyPatch,
     mock_docker,
 ) -> None:
-    monkeypatch.setattr(service, "JOB_SCRATCH_ROOT", str(tmp_path))
+    scratch = tmp_path / "jobs"
+    scratch.mkdir()
+    monkeypatch.setattr(service, "JOB_SCRATCH_ROOT", str(scratch))
 
     response = client.post(
         "/execute/write_note",
@@ -214,7 +230,7 @@ def test_write_note_uses_and_cleans_job_scratch_dir(
     assert "volumes" in kwargs
     assert kwargs["user"] == "0:0"
     assert kwargs["network_mode"] == "none"
-    assert list(tmp_path.iterdir()) == []
+    assert list(scratch.iterdir()) == []
 
 
 def test_execute_command_uses_scratch_workspace_and_no_network(
@@ -222,7 +238,9 @@ def test_execute_command_uses_scratch_workspace_and_no_network(
     monkeypatch: pytest.MonkeyPatch,
     mock_docker,
 ) -> None:
-    monkeypatch.setattr(service, "JOB_SCRATCH_ROOT", str(tmp_path))
+    scratch = tmp_path / "jobs"
+    scratch.mkdir()
+    monkeypatch.setattr(service, "JOB_SCRATCH_ROOT", str(scratch))
 
     response = client.post(
         "/execute/execute_command",
@@ -240,4 +258,4 @@ def test_execute_command_uses_scratch_workspace_and_no_network(
     cmd = kwargs["command"]
     parsed_args = json.loads(cmd[4])
     assert parsed_args["working_dir"] == "/tmp/job"
-    assert list(tmp_path.iterdir()) == []
+    assert list(scratch.iterdir()) == []

@@ -152,6 +152,7 @@ class PolicyResult(BaseModel):
     policy_action: PolicyAction
     policy_reason: str
     requires_approval: bool = False
+    risk_score: int | None = Field(default=None, ge=0, le=100)
 
 
 class GatewayResult(BaseModel):
@@ -168,6 +169,7 @@ class GatewayResult(BaseModel):
     request_id: str
     gateway_decision: GatewayDecision
     decision_reason: str
+    reason_code: str | None = None
     tool_output: Any | None = None
 
 

@@ -137,238 +137,98 @@ _log.info(
 # ---------------------------------------------------------------------------
 
 
-def mediate(
-    request: PipelineRequest,
-    policy: PolicyResult,
-) -> GatewayResult:
-    """
-    Evaluate a proposed tool call and either execute or deny it.
+def action_fingerprint(request: PipelineRequest, policy: PolicyResult) -> str:
+    """Bind approval to exact intent, executable payload, identity and configuration."""
+    import hashlib
+    import json
+    from app.policy.engine import POLICY_VERSION
+    material = {"content": request.content, "source_type": request.source_type.value,
+                "tool": request.proposed_tool, "args": request.tool_args or {},
+                "requester": request.agent_id or "anonymous", "policy": policy.policy_action.value,
+                "policy_version": POLICY_VERSION, "registry_version": REGISTRY_VERSION}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
-    Checks: tool proposed → allowlist → policy gate → rate limit →
-            circuit breaker → schema → approval → execute.
-    """
+
+def mediate(request: PipelineRequest, policy: PolicyResult) -> GatewayResult:
+    """Validate, bind approval, enforce quotas, then dispatch through one boundary."""
+    from app.gateway.validation import ArgumentValidationError, validate_tool_args
+    from app.gateway.domain_validation import validate_tool_urls
     req_id = request.request_id
-    agent_id = (request.agent_id or "anonymous").strip() or "anonymous"
+    agent_id = request.agent_id or "anonymous"
     tool_name = request.proposed_tool
     tool_args = request.tool_args or {}
 
-    # --- No tool proposed ---
+    def deny(code: str, reason: str) -> GatewayResult:
+        return GatewayResult(request_id=req_id, gateway_decision=GatewayDecision.DENIED,
+                             reason_code=code, decision_reason=reason)
+
     if not tool_name:
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason="No tool proposed in request.",
-        )
-
-    # --- Allowlist check ---
+        return deny("TOOL_REQUIRED", "No tool proposed in request.")
     if tool_name not in TOOL_ALLOWLIST:
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=(
-                f"Tool '{tool_name}' is not on the allowlist. "
-                f"Allowed tools: {sorted(TOOL_ALLOWLIST)}."
-            ),
-        )
+        return deny("TOOL_NOT_ALLOWED", "Tool is not on the allowlist.")
+    try:
+        validate_tool_args(tool_name, tool_args, _registry)
+        if any(not item.is_approved for item in validate_tool_urls(tool_args)):
+            return deny("DOMAIN_DENIED", "Tool URL is outside the configured domain policy.")
+        fingerprint = action_fingerprint(request, policy)
+    except ArgumentValidationError as exc:
+        return deny(exc.code, "Missing required argument." if exc.code == "MISSING_ARGUMENT"
+                    else "Tool arguments are invalid or outside registry constraints.")
+    except Exception:
+        return deny("CONFIGURATION_UNAVAILABLE", "Security configuration unavailable.")
+    if policy.policy_action not in EXECUTABLE_ACTIONS | {PolicyAction.REQUIRE_APPROVAL}:
+        return deny("POLICY_DENIED", f"Policy action '{policy.policy_action.value}' denies execution.")
 
-    # --- Policy gate: only ALLOW and SANITIZE permit execution ---
-    if policy.policy_action not in EXECUTABLE_ACTIONS:
-        # If REQUIRE_APPROVAL, submit to approval queue instead of flat deny
-        if policy.policy_action == PolicyAction.REQUIRE_APPROVAL:
-            approval_record = approval_manager.get_status(req_id)
-            if approval_record is None:
-                approval_manager.submit(
-                    request_id=req_id,
-                    risk_score=0,  # actual score is in policy_reason text
-                    risk_categories=[],
-                    proposed_tool=tool_name,
-                )
-                return GatewayResult(
-                    request_id=req_id,
-                    gateway_decision=GatewayDecision.DENIED,
-                    decision_reason=(
-                        f"Awaiting human approval. Request '{req_id}' has been "
-                        f"queued. Use POST /approve/{req_id} to approve."
-                    ),
-                )
+    needs_approval = (policy.policy_action == PolicyAction.REQUIRE_APPROVAL
+                      or tool_name == "execute_command"
+                      or (tool_name == "summarize" and _SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL
+                          and len(tool_args["text"]) > _SUMMARIZE_LOCAL_MAX_CHARS))
+    # An existing approval must never be transferable, even if policy now permits the action.
+    record = approval_manager.get_status(req_id)
+    if record and (record.action_hash != fingerprint or record.requester != agent_id):
+        return deny("APPROVAL_ACTION_MISMATCH", "Request ID is already bound to a different action or caller.")
+    if record and record.status == ApprovalStatus.CONSUMED:
+        return deny("APPROVAL_CONSUMED", "Approval has already been used.")
+    if needs_approval:
+        if record is None:
+            try:
+                record = approval_manager.submit(req_id, policy.risk_score or 0, [], tool_name,
+                                                 action_hash=fingerprint, requester=agent_id,
+                                                 action_details={"content": request.content,
+                                                                 "source_type": request.source_type.value,
+                                                                 "tool_args": tool_args})
+            except ValueError:
+                return deny("APPROVAL_ACTION_MISMATCH", "Concurrent request ID conflicts with this action.")
+        if record.status != ApprovalStatus.APPROVED:
+            if record.status == ApprovalStatus.PENDING:
+                return deny("APPROVAL_REQUIRED", "Execution requires human approval; request queued. "
+                            f"Use POST /approve/{req_id} then replay this exact request.")
+            return deny("APPROVAL_NOT_VALID", f"Approval status '{record.status.value}' denies execution.")
 
-            if approval_record.status == ApprovalStatus.APPROVED:
-                _log.info("Approved replay request_id=%s tool=%s", req_id, tool_name)
-            elif approval_record.status == ApprovalStatus.PENDING:
-                return GatewayResult(
-                    request_id=req_id,
-                    gateway_decision=GatewayDecision.DENIED,
-                    decision_reason=(
-                        f"Awaiting human approval. Request '{req_id}' is still pending. "
-                        f"Use POST /approve/{req_id} to approve."
-                    ),
-                )
-            else:
-                return GatewayResult(
-                    request_id=req_id,
-                    gateway_decision=GatewayDecision.DENIED,
-                    decision_reason=(
-                        f"Request '{req_id}' approval status is "
-                        f"'{approval_record.status.value}', so execution is denied."
-                    ),
-                )
-        else:
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Policy action '{policy.policy_action.value}' does not permit "
-                    f"tool execution. Reason: {policy.policy_reason}"
-                ),
-            )
-
-    # --- execute_command: always require explicit human approval ---
-    if tool_name == "execute_command" and _EXECUTE_COMMAND_ALWAYS_REQUIRES_APPROVAL:
-        approval_record = approval_manager.get_status(req_id)
-        if approval_record is None:
-            approval_manager.submit(
-                request_id=req_id,
-                risk_score=0,
-                risk_categories=["EXECUTE_COMMAND"],
-                proposed_tool=tool_name,
-            )
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Command execution always requires human approval. "
-                    f"Request '{req_id}' has been queued. Use POST /approve/{req_id} to approve."
-                ),
-            )
-
-        if approval_record.status == ApprovalStatus.APPROVED:
-            _log.info("execute_command approved request_id=%s", req_id)
-        elif approval_record.status == ApprovalStatus.PENDING:
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Awaiting human approval. Request '{req_id}' is still pending. "
-                    f"Use POST /approve/{req_id} to approve."
-                ),
-            )
-        else:
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Request '{req_id}' approval status is "
-                    f"'{approval_record.status.value}'."
-                ),
-            )
-
-    # --- Argument schema check ---
-    required_args = TOOL_SCHEMAS[tool_name]
-    missing = [arg for arg in required_args if arg not in tool_args]
-    if missing:
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=(
-                f"Tool '{tool_name}' is missing required argument(s): {missing}."
-            ),
-        )
-
-    # --- Summarize oversize guard: queue for human approval before cloud path ---
-    if (
-        tool_name == "summarize"
-        and _SUMMARIZE_OVERSIZE_REQUIRES_APPROVAL
-        and len(str(tool_args.get("text", ""))) > _SUMMARIZE_LOCAL_MAX_CHARS
-    ):
-        approval_record = approval_manager.get_status(req_id)
-        if approval_record is None:
-            approval_manager.submit(
-                request_id=req_id,
-                risk_score=0,
-                risk_categories=["SUMMARIZE_OVERSIZE"],
-                proposed_tool=tool_name,
-            )
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Summarize input exceeded local threshold of "
-                    f"{_SUMMARIZE_LOCAL_MAX_CHARS} chars and requires human approval. "
-                    f"Request '{req_id}' has been queued. Use POST /approve/{req_id} to approve."
-                ),
-            )
-        if approval_record.status == ApprovalStatus.APPROVED:
-            _log.info("Approved oversize summarize replay request_id=%s", req_id)
-        elif approval_record.status == ApprovalStatus.PENDING:
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Summarize oversize request '{req_id}' is still pending approval. "
-                    f"Use POST /approve/{req_id} to approve."
-                ),
-            )
-        else:
-            return GatewayResult(
-                request_id=req_id,
-                gateway_decision=GatewayDecision.DENIED,
-                decision_reason=(
-                    f"Request '{req_id}' approval status is "
-                    f"'{approval_record.status.value}', so execution is denied."
-                ),
-            )
-
-    # --- Rate limit check (Task 3.20) ---
     if not rate_limiter.check(tool_name, agent_id=agent_id):
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=(
-                f"Rate limit exceeded for agent '{agent_id}' on tool "
-                f"'{tool_name}'. Try again later."
-            ),
-        )
-
-    # --- Circuit breaker check (Task 3.21) ---
+        return deny("RATE_LIMITED", f"Rate limit exceeded for agent '{agent_id}' on tool '{tool_name}'.")
     cb = circuit_registry.get(tool_name)
     if not cb.allow_request():
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=(
-                f"Circuit breaker OPEN for tool '{tool_name}'. "
-                f"Backend is experiencing failures; request rejected to prevent cascade."
-            ),
-        )
+        return deny("CIRCUIT_OPEN", "Circuit breaker OPEN; tool backend unavailable.")
+    if needs_approval and not approval_manager.consume(req_id, fingerprint, agent_id):
+        return deny("APPROVAL_NOT_VALID", "Approval expired or was already consumed by another dispatch.")
 
-    # --- All checks passed: route to executor (with timeout + retry policy) ---
-    executor = _TOOL_EXECUTORS[tool_name]
     try:
-        output = run_with_policy(tool_name, executor, tool_args)
+        executor = _TOOL_EXECUTORS[tool_name]
+        if _USE_REAL_TOOLS:
+            from app.auth.capabilities import issue_runner
+            from app.gateway.sandbox_client import build_sandbox_executor
+            capability = issue_runner(request, policy, request.request_id)
+            executor = build_sandbox_executor(tool_name, capability=capability)
+        output = run_with_policy(tool_name, executor, tool_args, max_attempts=1 if needs_approval else None)
         cb.record_success()
-    except TimeoutError as exc:
-        cb.record_failure()
-        _log.warning("Executor timed out for tool '%s': %s", tool_name, exc)
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=str(exc),
-        )
     except Exception as exc:
         cb.record_failure()
-        _log.error("Executor failed for tool '%s': %s", tool_name, exc)
-        return GatewayResult(
-            request_id=req_id,
-            gateway_decision=GatewayDecision.DENIED,
-            decision_reason=f"Tool '{tool_name}' execution failed: {exc}",
-        )
-
-    return GatewayResult(
-        request_id=req_id,
-        gateway_decision=GatewayDecision.EXECUTED,
-        decision_reason=(
-            f"Tool '{tool_name}' passed all checks and was executed "
-            f"via {_executor_mode} executor."
-        ),
-        tool_output=output,
-    )
+        _log.warning("Tool execution failed tool=%s request_id=%s error_type=%s",
+                     tool_name, req_id, type(exc).__name__)
+        return deny("EXECUTION_TIMEOUT" if isinstance(exc, TimeoutError) else "EXECUTION_FAILED",
+                    "Tool timed out; execution outcome may be uncertain." if isinstance(exc, TimeoutError)
+                    else "Tool execution failed; execution outcome may be uncertain.")
+    return GatewayResult(request_id=req_id, gateway_decision=GatewayDecision.EXECUTED,
+                         reason_code="EXECUTED", decision_reason=f"Tool executed via {_executor_mode} executor.",
+                         tool_output=output)

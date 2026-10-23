@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 import docker
@@ -320,11 +320,21 @@ class ExecuteRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.post("/execute/{tool_name}")
-def execute_tool(tool_name: str, payload: ExecuteRequest) -> dict:
+def execute_tool(tool_name: str, payload: ExecuteRequest, request: Request) -> dict:
     """
     Spawn an ephemeral job container via the Docker SDK.
     Wait for execution, parse stdout JSON, and destroy the container.
     """
+    from app.auth.capabilities import authorize_runner
+    from app.auth.oidc import AuthenticationError
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Runner capability required.")
+    try:
+        authorize_runner(token, tool_name, payload.tool_args)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from None
     if _docker_client is None:
         raise HTTPException(
             status_code=500,

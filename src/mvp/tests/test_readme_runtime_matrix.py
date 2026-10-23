@@ -162,11 +162,11 @@ def test_readme_runtime_matrix_url_tools_block_unapproved(
         ("document_qa", {"document_url": "https://evil.com/d.pdf", "query": "summary"}),
     ],
 )
-def test_readme_runtime_matrix_url_tools_execute_with_approved_domain(
+def test_readme_runtime_matrix_caller_domains_cannot_unblock_tools(
     tool_name: str,
     tool_args: dict[str, str],
 ) -> None:
-    """User-provided approved_domains should unblock URL-bearing tools."""
+    """User-provided domains cannot replace server authorization policy."""
     response = client.post(
         "/pipeline",
         json={
@@ -181,8 +181,8 @@ def test_readme_runtime_matrix_url_tools_execute_with_approved_domain(
 
     assert response.status_code == 200
     data = response.json()
-    assert data["policy"]["policy_action"] == "ALLOW"
-    assert data["gateway"]["gateway_decision"] == "EXECUTED"
+    assert data["policy"]["policy_action"] == "BLOCK"
+    assert data["gateway"]["gateway_decision"] == "DENIED"
 
 
 def test_readme_runtime_matrix_blocks_private_ip_url_tool() -> None:

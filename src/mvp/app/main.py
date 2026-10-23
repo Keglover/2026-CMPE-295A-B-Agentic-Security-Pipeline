@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -52,6 +52,13 @@ from app.policy import engine as policy_engine
 from app.policy.pii_detector import redact as pii_redact
 from app.policy import prompt_guard
 from app.risk import engine as risk_engine
+from app.assessment import assess_content
+from app.evaluation.routes import router as evaluation_router
+from app.auth.middleware import authenticate
+from app.auth.routes import router as auth_router
+from app.execution.routes import router as execution_router
+from app.execution.service import execute_action
+from app.auth.agents import router as agent_auth_router
 
 # ---------------------------------------------------------------------------
 # Process-level asyncio configuration
@@ -116,6 +123,11 @@ app = FastAPI(
     version="0.2.0",
     lifespan=_lifespan,
 )
+app.include_router(evaluation_router)
+app.include_router(auth_router)
+app.include_router(execution_router)
+app.include_router(agent_auth_router)
+app.middleware("http")(authenticate)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +141,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "version": "0.2.0",
+        "executor_mode": "SANDBOX" if gateway._USE_REAL_TOOLS else "MOCK",
         "circuit_breakers": circuit_registry.health_summary(),
         "pending_approvals": approval_manager.pending_count,
     }
@@ -146,7 +159,7 @@ def list_tools() -> dict:
 @app.post("/validate-urls", response_model=ValidateUrlsResponse, tags=["pipeline"])
 def validate_urls(request: ValidateUrlsRequest) -> ValidateUrlsResponse:
     """Pre-flight URL validation for tool arguments used by UI and tests."""
-    entries = validate_tool_urls(request.tool_args, request.approved_domains)
+    entries = validate_tool_urls(request.tool_args)
     blocked_count = sum(1 for entry in entries if not entry.is_approved)
     return ValidateUrlsResponse(
         urls=entries,
@@ -156,7 +169,7 @@ def validate_urls(request: ValidateUrlsRequest) -> ValidateUrlsResponse:
 
 
 @app.post("/pipeline", response_model=PipelineResponse, tags=["pipeline"])
-def run_pipeline(request: PipelineRequest) -> PipelineResponse:
+def run_pipeline(request: PipelineRequest, http_request: Request) -> PipelineResponse:
     """
     Run the full security pipeline on an input payload.
 
@@ -168,13 +181,19 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
       4. Gateway    — execute the tool (if proposed and allowed)
       5. Audit      — write the decision trace
     """
+    identity = getattr(http_request.state, "identity", None)
+    if identity is not None:
+        request = request.model_copy(update={"agent_id": identity.subject, "approved_domains": []})
+    else:
+        request = request.model_copy(update={"approved_domains": []})
     _log.info("Pipeline start request_id=%s", request.request_id)
+    original_content = request.content
 
     # Stage 0: Prompt Guard pre-check (rule/model-based detector)
     prompt_guard_result = prompt_guard.detect(request.request_id, request.content)
 
     # Stage 1: Normalize
-    normalized = normalizer.normalize(request)
+    normalized, risk, policy = assess_content(request)
     _log.info(
         "Normalized request_id=%s notes=%s",
         request.request_id,
@@ -182,7 +201,6 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
     )
 
     # Stage 2: Risk scoring
-    risk = risk_engine.score(normalized)
     _log.info(
         "Risk request_id=%s score=%d categories=%s",
         request.request_id,
@@ -191,19 +209,6 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
     )
 
     # Stage 3: Policy decision (with fail-closed wrapper)
-    try:
-        policy = policy_engine.decide(risk)
-    except Exception as exc:
-        _log.error(
-            "Policy engine failed for request_id=%s: %s — fail-closed to BLOCK",
-            request.request_id, exc,
-        )
-        policy = PolicyResult(
-            request_id=risk.request_id,
-            policy_action=PolicyAction.BLOCK,
-            policy_reason=policy_engine.FAIL_CLOSED_REASON,
-            requires_approval=False,
-        )
     _log.info(
         "Policy request_id=%s action=%s",
         request.request_id,
@@ -280,7 +285,12 @@ def run_pipeline(request: PipelineRequest) -> PipelineResponse:
     # Stage 5: Gateway (only when a tool call is proposed)
     gateway_result = None
     if request.proposed_tool:
-        gateway_result = gateway.mediate(request, policy)
+        evaluation, gateway_result = execute_action(request.model_copy(update={"content": original_content}), policy)
+        if evaluation.status == "evaluated" and evaluation.policy_action != policy.policy_action:
+            # The final arguments (including planner output) have their own assessment.
+            if policy.policy_action not in {PolicyAction.BLOCK, PolicyAction.QUARANTINE}:
+                policy = policy.model_copy(update={"policy_action": evaluation.policy_action,
+                                                   "policy_reason": evaluation.reason_code})
         _log.info(
             "Gateway request_id=%s decision=%s",
             request.request_id,
@@ -344,6 +354,10 @@ def list_pending() -> dict:
                 "proposed_tool": r.proposed_tool,
                 "status": r.status.value,
                 "created_at": r.created_at,
+                "expires_at": r.expires_at,
+                "requester": r.requester,
+                "action_hash": r.action_hash,
+                "action_details": r.action_details,
             }
             for r in pending
         ],
@@ -351,11 +365,12 @@ def list_pending() -> dict:
 
 
 @app.post("/approve/{request_id}", tags=["approval"])
-def approve_request(request_id: str, body: ApprovalBody | None = None) -> dict:
+def approve_request(request_id: str, http_request: Request, body: ApprovalBody | None = None) -> dict:
     """Approve a pending REQUIRE_APPROVAL request."""
     body = body or ApprovalBody()
+    identity = getattr(http_request.state, "identity", None)
     record = approval_manager.approve(
-        request_id, approved_by=body.approved_by, reason=body.reason,
+        request_id, approved_by=identity.subject if identity else body.approved_by, reason=body.reason,
     )
     if record is None:
         raise HTTPException(
@@ -371,11 +386,12 @@ def approve_request(request_id: str, body: ApprovalBody | None = None) -> dict:
 
 
 @app.post("/reject/{request_id}", tags=["approval"])
-def reject_request(request_id: str, body: ApprovalBody | None = None) -> dict:
+def reject_request(request_id: str, http_request: Request, body: ApprovalBody | None = None) -> dict:
     """Reject a pending REQUIRE_APPROVAL request."""
     body = body or ApprovalBody()
+    identity = getattr(http_request.state, "identity", None)
     record = approval_manager.reject(
-        request_id, rejected_by=body.approved_by, reason=body.reason,
+        request_id, rejected_by=identity.subject if identity else body.approved_by, reason=body.reason,
     )
     if record is None:
         raise HTTPException(

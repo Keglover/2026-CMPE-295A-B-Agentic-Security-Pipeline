@@ -151,6 +151,8 @@ def run_with_policy(
     tool_name: str,
     executor: Callable[[dict[str, Any]], Any],
     args: dict[str, Any],
+    *,
+    max_attempts: int | None = None,
 ) -> Any:
     """
     Call *executor(args)* subject to the execution policy for *tool_name*.
@@ -173,9 +175,12 @@ def run_with_policy(
     """
     policy = _load_policy(tool_name)
     retry = policy.retry
+    attempts = min(retry.max_attempts, max_attempts) if max_attempts is not None else retry.max_attempts
+    if attempts < 1:
+        raise ValueError("Execution attempts must be positive")
     last_exc: Exception | None = None
 
-    for attempt in range(retry.max_attempts):
+    for attempt in range(attempts):
         if attempt > 0:
             wait = _backoff_seconds(attempt - 1, retry.backoff_base, retry.backoff_max)
             _log.info(
@@ -242,12 +247,12 @@ def _run_with_timeout(
     """
     Run *executor(args)* in a thread and block for at most *timeout_sec*.
 
-    Uses a daemon thread so it does not prevent interpreter exit if the
-    executor is stuck.  The thread is NOT killed — it keeps running in the
+    The worker thread is NOT killed — it keeps running in the
     background until it naturally completes or the process exits.  This is
     the standard Python approach: true hard-kill of threads is not supported.
     """
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(executor, args)
         try:
             return future.result(timeout=timeout_sec)
@@ -255,3 +260,7 @@ def _run_with_timeout(
             raise TimeoutError(
                 f"Executor did not complete within {timeout_sec}s."
             ) from exc
+    finally:
+        # A context manager waits for a stuck worker on exit, defeating the deadline.
+        # The worker may still finish later; callers must treat timeout as uncertain.
+        pool.shutdown(wait=False, cancel_futures=True)
