@@ -37,11 +37,3 @@ test.txt
 # gVisor setup — API key must never be committed
 gvisor/ollama.env
 
-# Local identity-provider credentials and runtime state
-/auth/.env.keycloak
-/auth/.env.auth0
-/auth/.env.models
-/auth/.env.typesafe
-/auth/.runtime/
-/auth/README.local.md
-

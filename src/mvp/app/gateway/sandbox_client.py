@@ -74,20 +74,17 @@ def _client_timeout_for_tool(tool_name: str) -> float:
         return 10.0
 
 
-def build_sandbox_executor(tool_name: str, *, capability: str | None = None) -> Callable[[dict[str, Any]], str]:
+def build_sandbox_executor(tool_name: str) -> Callable[[dict[str, Any]], str]:
     """Create an executor callable that delegates to the sandbox service."""
 
     endpoint = _sandbox_endpoint_for_tool(tool_name)
     timeout = _client_timeout_for_tool(tool_name)
 
     def _execute(args: dict[str, Any]) -> str:
-        if not capability:
-            raise RuntimeError("Runner capability required; direct execution is denied.")
-        with httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{endpoint}/execute/{tool_name}",
                 json={"tool_args": args},
-                headers={"Authorization": "Bearer " + capability},
             )
             if response.status_code >= 400:
                 try:

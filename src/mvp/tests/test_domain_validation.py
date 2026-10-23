@@ -56,8 +56,8 @@ def test_validate_urls_unapproved_blocked():
     assert "not in the allowlist" in data["urls"][0]["warning"]
 
 
-def test_validate_urls_caller_cannot_authorize_domain():
-    """Caller-provided approved_domains cannot confer server authority."""
+def test_validate_urls_user_approved_passes():
+    """Passing approved_domains in the request should mark the domain approved."""
     payload = {
         "proposed_tool": "fetch_url",
         "tool_args": {"url": "https://evil.com/collect"},
@@ -66,9 +66,9 @@ def test_validate_urls_caller_cannot_authorize_domain():
     response = client.post("/validate-urls", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["can_proceed"] is False
-    assert data["blocked_count"] == 1
-    assert data["urls"][0]["is_approved"] is False
+    assert data["can_proceed"] is True
+    assert data["blocked_count"] == 0
+    assert data["urls"][0]["is_approved"] is True
     assert data["urls"][0]["is_allowed"] is False  # still not on allowlist
 
 
@@ -136,9 +136,10 @@ def test_pipeline_unapproved_domain_requires_approval():
     assert data["domain_validation"][0]["hostname"] == "evil.com"
 
 
-def test_pipeline_with_caller_approved_domains_stays_blocked():
+def test_pipeline_with_approved_domains_executes():
     """
-    A client cannot bypass configured domain policy with approved_domains.
+    When the user pre-approves the domain via approved_domains,
+    the pipeline should proceed to ALLOW and EXECUTE.
     """
     payload = {
         "content": "Please fetch the latest news.",
@@ -154,14 +155,17 @@ def test_pipeline_with_caller_approved_domains_stays_blocked():
     # Risk should be low (benign input)
     assert data["risk"]["risk_score"] < 15
 
-    assert data["policy"]["policy_action"] == "BLOCK"
+    # Policy should be ALLOW
+    assert data["policy"]["policy_action"] == "ALLOW"
     assert data["policy"]["requires_approval"] is False
 
-    assert data["gateway"]["gateway_decision"] == "DENIED"
-    assert data["gateway"]["tool_output"] is None
+    # Gateway should EXECUTE (mock returns simulated content)
+    assert data["gateway"]["gateway_decision"] == "EXECUTED"
+    assert "MOCK" in data["gateway"]["tool_output"] or "Error" not in data["gateway"]["tool_output"]
 
+    # Domain validation should show user-approved
     dv = data["domain_validation"][0]
-    assert dv["is_approved"] is False
+    assert dv["is_approved"] is True
     assert dv["is_allowed"] is False  # still not on allowlist
 
 

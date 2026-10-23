@@ -29,7 +29,6 @@ TODO List:
 from __future__ import annotations
 
 import logging
-import os
 import time
 import threading
 from dataclasses import dataclass, field
@@ -46,7 +45,6 @@ class ApprovalStatus(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     TIMED_OUT = "timed_out"
-    CONSUMED = "consumed"
 
 
 @dataclass
@@ -75,11 +73,6 @@ class ApprovalRecord:
     resolved_at: float | None = None
     resolved_by: str | None = None
     reason: str = ""
-    action_hash: str | None = None
-    requester: str | None = None
-    expires_at: float | None = None
-    consumed_at: float | None = None
-    action_details: dict[str, Any] = field(default_factory=dict)
 
 
 class ApprovalManager:
@@ -96,14 +89,13 @@ class ApprovalManager:
     TODO: [ ] Task 4.13 — Background thread/task for timeout enforcement
     """
 
-    def __init__(self, timeout_seconds: float = 300.0, approved_timeout_seconds: float | None = None) -> None:
+    def __init__(self, timeout_seconds: float = 300.0) -> None:
         """
         Args:
             timeout_seconds: Seconds before a pending request auto-denies.
                              Default: 300s (5 minutes).
         """
         self._timeout = timeout_seconds
-        self._approved_timeout = approved_timeout_seconds
         self._pending: dict[str, ApprovalRecord] = {}
         self._resolved: dict[str, ApprovalRecord] = {}
         self._lock = threading.Lock()
@@ -114,10 +106,6 @@ class ApprovalManager:
         risk_score: int,
         risk_categories: list[str],
         proposed_tool: str | None = None,
-        *,
-        action_hash: str | None = None,
-        requester: str | None = None,
-        action_details: dict[str, Any] | None = None,
     ) -> ApprovalRecord:
         """
         Register a new request for approval.
@@ -136,17 +124,8 @@ class ApprovalManager:
             risk_score=risk_score,
             risk_categories=risk_categories,
             proposed_tool=proposed_tool,
-            action_hash=action_hash,
-            requester=requester,
-            expires_at=time.time() + self._timeout,
-            action_details=__import__("copy").deepcopy(action_details or {}),
         )
         with self._lock:
-            existing = self._pending.get(request_id) or self._resolved.get(request_id)
-            if existing is not None:
-                if existing.action_hash != action_hash or existing.requester != requester:
-                    raise ValueError("APPROVAL_ACTION_MISMATCH")
-                return existing
             self._pending[request_id] = record
         _log.info(
             "Approval requested: request_id=%s tool=%s score=%d",
@@ -178,14 +157,8 @@ class ApprovalManager:
             if record is None:
                 _log.warning("Approve failed: request_id=%s not found in pending", request_id)
                 return None
-            if self._expired(record):
-                self._expire(record)
-                return None
             record.status = ApprovalStatus.APPROVED
             record.resolved_at = time.time()
-            if self._approved_timeout is not None:
-                record.expires_at = min(record.created_at + self._timeout,
-                                        record.resolved_at + self._approved_timeout)
             record.resolved_by = approved_by
             record.reason = reason
             self._resolved[request_id] = record
@@ -235,7 +208,7 @@ class ApprovalManager:
             expired_ids = [
                 rid
                 for rid, rec in self._pending.items()
-                if self._expired(rec)
+                if now - rec.created_at >= self._timeout
             ]
             for rid in expired_ids:
                 record = self._pending.pop(rid)
@@ -250,57 +223,19 @@ class ApprovalManager:
     def get_status(self, request_id: str) -> ApprovalRecord | None:
         """Look up the current status of any request (pending or resolved)."""
         with self._lock:
-            record = self._pending.get(request_id) or self._resolved.get(request_id)
-            if record and record.status in {ApprovalStatus.PENDING, ApprovalStatus.APPROVED} and self._expired(record):
-                self._pending.pop(request_id, None)
-                self._expire(record)
-            return record
-
-    def _expired(self, record: ApprovalRecord) -> bool:
-        # Use the earlier deadline so old records and clock-based tests remain safe.
-        return time.time() >= min(record.created_at + self._timeout,
-                                  record.expires_at or float("inf"))
-
-    def _expire(self, record: ApprovalRecord) -> None:
-        record.status = ApprovalStatus.TIMED_OUT
-        record.resolved_at = time.time()
-        record.reason = "Approval expired; execution denied."
-        self._resolved[record.request_id] = record
-
-    def consume(self, request_id: str, action_hash: str, requester: str) -> bool:
-        """Atomically reserve an exact approved action for one dispatch attempt."""
-        with self._lock:
-            record = self._resolved.get(request_id)
-            if (record is None or record.status != ApprovalStatus.APPROVED
-                    or record.action_hash != action_hash or record.requester != requester):
-                return False
-            if self._expired(record):
-                self._expire(record)
-                return False
-            record.status = ApprovalStatus.CONSUMED
-            record.consumed_at = time.time()
-            return True
+            return self._pending.get(request_id) or self._resolved.get(request_id)
 
     def list_pending(self) -> list[ApprovalRecord]:
         """Return all currently pending approval requests."""
-        self.check_timeouts()
         with self._lock:
             return list(self._pending.values())
 
     @property
     def pending_count(self) -> int:
         """Number of requests currently awaiting approval."""
-        return len(self.list_pending())
+        return len(self._pending)
 
 
 # Module-level singleton
 # TODO: [ ] Initialize timeout from config/policy_thresholds.yaml
-_pending_ttl = int(os.getenv("JEV_APPROVAL_PENDING_TTL", "300"))
-_grant_ttl = int(os.getenv("JEV_APPROVAL_GRANT_TTL", "300"))
-if not 1 <= _pending_ttl <= 604800 or not 1 <= _grant_ttl <= 300:
-    raise ValueError("Invalid approval lifetime configuration")
-if os.getenv("JEV_GATEWAY_STATE_DB"):
-    from app.approval.durable import SQLiteApprovalManager
-    approval_manager = SQLiteApprovalManager(os.environ["JEV_GATEWAY_STATE_DB"], _pending_ttl, _grant_ttl)
-else:
-    approval_manager = ApprovalManager(_pending_ttl, _grant_ttl)
+approval_manager = ApprovalManager()

@@ -48,25 +48,6 @@ def _llm_judge_enabled() -> bool:
 
 
 @dataclass
-class OrderedPattern:
-    """Find encoding markers in order without nested greedy backtracking."""
-
-    parts: tuple[re.Pattern[str], ...]
-
-    def search(self, text: str) -> re.Match[str] | None:
-        position = 0
-        first = None
-        for part in self.parts:
-            match = part.search(text, position)
-            if match is None:
-                return None
-            if first is None:
-                first = match
-            position = match.end()
-        return first
-
-
-@dataclass
 class Rule:
     """
     A single detection rule.
@@ -79,7 +60,7 @@ class Rule:
     """
 
     name: str
-    pattern: re.Pattern[str] | OrderedPattern
+    pattern: re.Pattern[str]
     category: RiskCategory
     score_contribution: int
 
@@ -216,9 +197,7 @@ RULES: list[Rule] = [
 
     # ---------------- OBFUSCATION ----------------
     Rule("stealth_obfuscation_combo",
-         OrderedPattern((re.compile(r"[A-Za-z0-9+/]{20,}={0,2}", _FLAGS),
-                         re.compile(r"\\u[0-9a-fA-F]{4}", _FLAGS),
-                         re.compile(r"0x[0-9a-fA-F]{2,}", _FLAGS))),
+         re.compile(r"([A-Za-z0-9+/]{20,}={0,2}).*(\\u[0-9a-fA-F]{4}).*(0x[0-9a-fA-F]{2,})", _FLAGS),
          RiskCategory.OBFUSCATION, 35),
 
     Rule("base64_like_blob",
