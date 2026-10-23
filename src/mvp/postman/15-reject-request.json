@@ -1,0 +1,19 @@
+{
+  "name": "15 Reject Request",
+  "method": "POST",
+  "url": "{{baseUrl}}/reject/{{rejectRequestId}}",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "approved_by": "reviewer",
+    "reason": "rejected for test"
+  },
+  "expected": {
+    "status": 200,
+    "status_field": "rejected"
+  },
+  "notes": {
+    "rejectRequestId": "Set to the request_id used in test 14, e.g. reject-demo-001"
+  }
+}

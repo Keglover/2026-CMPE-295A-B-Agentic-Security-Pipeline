@@ -11,17 +11,13 @@ from promptrail.config import Settings
 
 
 class LoginError(Exception):
-    """Represent a safe login failure code without private upstream content."""
     def __init__(self, code: str):
-        """Store the public reason code used by terminal error handling."""
         self.code = code
         super().__init__(code)
 
 
 class DeviceChallenge(BaseModel):
-    """Validated device authorization response with a masked device secret."""
     model_config = ConfigDict(extra="ignore", strict=True)
-    # The device secret is used by polling; only user_code belongs in terminal output.
     device_code: SecretStr
     user_code: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9-]+$")
     verification_uri: str
@@ -32,14 +28,12 @@ class DeviceChallenge(BaseModel):
     @field_validator("device_code")
     @classmethod
     def bounded_code(cls, value):
-        """Limit the private device code length before polling can use it."""
         if not 1 <= len(value.get_secret_value()) <= 4096:
             raise ValueError("Invalid device code")
         return value
 
 
 class VerifiedIdentity(BaseModel):
-    """Strict gateway-verified identity contract; extra response fields are rejected."""
     model_config = ConfigDict(extra="forbid", strict=True)
     subject: str = Field(min_length=1, max_length=256)
     issuer: str
@@ -50,11 +44,8 @@ class VerifiedIdentity(BaseModel):
 
 
 class DeviceLogin:
-    """Manage bounded device authorization and gateway verification in one HTTP context."""
     def __init__(self, settings: Settings, *, transport=None, clock=time.monotonic, sleep=time.sleep):
-        """Create a nonredirecting client with injectable transport, monotonic clock and sleep."""
         self.settings, self.clock, self.sleep = settings, clock, sleep
-        # Never follow a redirect carrying a device secret/token or inherit ambient proxy settings.
         self.http = httpx.Client(timeout=settings.timeout, trust_env=False,
                                  follow_redirects=False, transport=transport)
         self.profile = None
@@ -62,21 +53,17 @@ class DeviceLogin:
         self._deadline = None
 
     def __enter__(self):
-        """Return the flow for context-managed network resource ownership."""
         return self
 
     def __exit__(self, *args):
-        """Close the HTTP client on success, cancellation or failure."""
         self.http.close()
 
     def _request(self, method: str, url: str, **kwargs):
-        """Read a JSON object up to 1 MiB and translate transport errors into safe codes."""
         try:
             with self.http.stream(method, url, **kwargs) as response:
                 data = bytearray()
                 for chunk in response.iter_bytes(chunk_size=65536):
                     data.extend(chunk)
-                    # Bound response accumulation even if Content-Length is missing or dishonest.
                     if len(data) > 1048576:
                         raise LoginError("INVALID_IDENTITY_RESPONSE")
                 result = json.loads(data)
@@ -91,7 +78,6 @@ class DeviceLogin:
             raise LoginError("INVALID_IDENTITY_RESPONSE") from None
 
     def _issuer_url(self, url: str):
-        """Validate an endpoint and require the advertised issuer origin."""
         parsed = Settings(gateway_url=url)
         if origin(parsed.gateway_url) != origin(self.profile.issuer):
             raise LoginError("IDENTITY_ENDPOINT_MISMATCH")
@@ -99,7 +85,6 @@ class DeviceLogin:
 
     def _verification_url(self, url: str):
         # Device browser URLs may have a user-code query, but no credentials/fragment.
-        """Validate the browser URL while allowing its device user-code query."""
         from urllib.parse import urlsplit, urlunsplit
         parsed = urlsplit(url)
         if parsed.fragment or any(char.isspace() for char in url):
@@ -108,14 +93,12 @@ class DeviceLogin:
         return url
 
     def begin(self, scopes: list[str] | None = None, *, signup: bool = False) -> DeviceChallenge:
-        """Fetch login configuration, enforce signup opt-in and obtain a validated device challenge."""
         try:
             status, profile = self._request("GET", self.settings.gateway_url + "/auth/config")
             if status != 200:
                 raise LoginError("GATEWAY_CONFIGURATION_UNAVAILABLE")
             self.profile = LoginProfile.model_validate(profile)
             if signup:
-                # Check enrollment opt-in before sending a device request to the identity provider.
                 status, registration = self._request("GET", self.settings.gateway_url + "/auth/registration")
                 if status != 200 or registration.get("signup_enabled") is not True:
                     raise LoginError("SIGNUP_UNAVAILABLE")
@@ -135,7 +118,6 @@ class DeviceLogin:
             self._verification_url(challenge.verification_uri)
             if challenge.verification_uri_complete:
                 self._verification_url(challenge.verification_uri_complete)
-            # A monotonic deadline is unaffected by changes to the machine's wall clock.
             self._deadline = self.clock() + challenge.expires_in
             return challenge
         except LoginError:
@@ -159,7 +141,6 @@ class DeviceLogin:
             raise LoginError("INVALID_IDENTITY_CONFIGURATION") from None
 
     def poll(self, challenge: DeviceChallenge) -> SecretStr:
-        """Wait within the device deadline, handling pending, slow-down, denial and expiry."""
         if self._deadline is None or self.token_endpoint is None:
             raise LoginError("LOGIN_NOT_STARTED")
         interval = challenge.interval
@@ -175,12 +156,11 @@ class DeviceLogin:
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "client_id": self.profile.client_id,
                     "device_code": challenge.device_code.get_secret_value()},
-                    # A single HTTP poll must not receive a timeout longer than the remaining device lifetime.
                     timeout=min(self.settings.timeout, max(0.1, self._deadline - self.clock())))
             except LoginError as error:
                 if error.code != "IDENTITY_TIMEOUT":
                     raise
-                interval *= 2  # Back off network timeouts; the outer deadline still bounds the flow.
+                interval *= 2
                 continue
             if status == 200:
                 token = payload.get("access_token")
@@ -204,22 +184,18 @@ class DeviceLogin:
         raise LoginError("DEVICE_CODE_EXPIRED")
 
     def verify(self, token: SecretStr) -> VerifiedIdentity:
-        """Ask the gateway to verify a token, then check identity/profile/permission consistency."""
         try:
-            # The CLI does not decode a JWT and call it trusted; signature checks belong to the gateway.
             status, payload = self._request("GET", self.settings.gateway_url + "/auth/whoami",
                 headers={"Authorization": "Bearer " + token.get_secret_value()})
             if status != 200:
                 safe_codes = {"TOKEN_SUBJECT_MISSING", "TOKEN_CLAIM_MISSING", "TOKEN_EXPIRED",
                               "INSUFFICIENT_PERMISSION", "IDENTITY_UNAVAILABLE", "INVALID_TOKEN"}
-                # Only known public codes may reach the terminal, never arbitrary upstream error text.
                 code = payload.get("reason_code")
                 raise LoginError(code if code in safe_codes else "GATEWAY_TOKEN_REJECTED")
             identity = VerifiedIdentity.model_validate(payload)
             if (identity.issuer != self.profile.issuer or identity.audience != self.profile.audience
                     or identity.provider != self.profile.provider or identity.expires_at <= time.time()):
                 raise LoginError("IDENTITY_MISMATCH")
-            # openid requests the identity protocol; application permissions must be granted separately.
             required = set(self.profile.scopes) - {"openid"}
             if not required <= set(identity.permissions):
                 raise LoginError("INSUFFICIENT_PERMISSION")

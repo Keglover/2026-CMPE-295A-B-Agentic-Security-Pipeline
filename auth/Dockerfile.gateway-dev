@@ -1,0 +1,6 @@
+FROM python:3.12-slim
+WORKDIR /workspace/src/mvp
+COPY src/mvp/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+CMD ["python", "/workspace/auth/run-dev-api.py"]

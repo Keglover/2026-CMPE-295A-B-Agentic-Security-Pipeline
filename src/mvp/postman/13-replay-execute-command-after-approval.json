@@ -1,0 +1,17 @@
+{
+  "name": "13 Replay Execute Command (After Approval)",
+  "method": "POST",
+  "url": "{{baseUrl}}/pipeline",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "request_id": "exec-demo-001",
+    "source_type": "direct_prompt",
+    "content": "Write and execute a python program that prints the output of executing the dmesg command"
+  },
+  "expected": {
+    "status": 200,
+    "gateway_decision": "EXECUTED"
+  }
+}

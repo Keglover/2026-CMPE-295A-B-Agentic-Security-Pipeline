@@ -1,0 +1,27 @@
+# Linux development profile; shares the host's loopback to reach the local issuer.
+name: jev-gateway-dev
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: auth/Dockerfile.gateway-dev
+    user: "${JEV_DEV_UID:-1000}:${JEV_DEV_GID:-1000}"
+    network_mode: host
+    environment:
+      JEV_SELF_REGISTRATION_ENABLED: "${JEV_SELF_REGISTRATION_ENABLED:-false}"
+    volumes:
+      - ..:/workspace:ro
+      - ./.runtime:/workspace/auth/.runtime:rw
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6

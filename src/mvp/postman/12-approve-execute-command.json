@@ -1,0 +1,19 @@
+{
+  "name": "12 Approve Execute Command",
+  "method": "POST",
+  "url": "{{baseUrl}}/approve/{{approvalRequestId}}",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "approved_by": "reviewer",
+    "reason": "approved sandbox execution"
+  },
+  "expected": {
+    "status": 200,
+    "status_field": "approved"
+  },
+  "notes": {
+    "approvalRequestId": "Set to the request_id used in test 10, e.g. exec-demo-001"
+  }
+}

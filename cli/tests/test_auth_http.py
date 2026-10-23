@@ -8,6 +8,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from promptrail.client import unavailable
+from promptrail.models import EvaluationRequest, PolicyAction, ExecutionRequirement
 
 
 def test_standalone_signup_signin_expiry_and_generic_permissions(tmp_path):
@@ -48,6 +50,11 @@ def test_standalone_signup_signin_expiry_and_generic_permissions(tmp_path):
                     "verification_uri":issuer+"/verify", "expires_in":30, "interval":1})
             elif self.path == "/identity/token":
                 self.reply(200, {"access_token":"private-user-token", "token_type":"Bearer", "refresh_token":"never-save-this"})
+            elif self.path == "/evaluate":
+                request = EvaluationRequest.model_validate_json(body)
+                result = unavailable(request, "PUBLIC_SAMPLE").model_copy(update={"status":"evaluated", "risk_score":0,
+                    "policy_action":PolicyAction.ALLOW, "execution_requirement":ExecutionRequirement.NONE})
+                self.reply(200, result.model_dump(mode="json"))
             else:
                 self.reply(404, {})
     server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
@@ -62,9 +69,9 @@ def test_standalone_signup_signin_expiry_and_generic_permissions(tmp_path):
             assert all(value not in result.stdout+result.stderr for value in ["private-user-token","private-device-code","never-save-this"])
             return result
         for operation in ["signup","signin"]:
-            result=run("auth",operation,"--no-store")
+            result=run("auth",operation,"--no-store","--verify-evaluation")
             assert result.returncode==0,result.stdout+result.stderr
-            assert "Credential was not stored" in result.stdout
+            assert "Credential was not stored" in result.stdout and "Authenticated evaluation succeeded" in result.stdout
         result=run("auth","status","--json")
         assert result.returncode==0 and json.loads(result.stdout)["permissions"]==["example:inspect"]
         state["expired"]=True

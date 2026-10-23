@@ -1,30 +1,47 @@
-# Generated Python/package artifacts
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 .venv/
+.env
 *.egg-info/
-build/
 dist/
+build/
 .pytest_cache/
+audit_logs/*.ndjson
 .DS_Store
-.vscode/
+
+# Local worktree metadata/artifacts
 .worktrees/
 
-# Private configuration, credentials and runtime state
-.env
-.env.*
-/.runtime/
+# Runtime artifacts (MVP)
+src/mvp/audit_logs/*.ndjson
+src/mvp/sandbox/notes/*
+!src/mvp/sandbox/notes/.gitkeep
+sandbox/notes/*
+!sandbox/notes/.gitkeep
+
+# Project-specific exclusions
+tracker/
+Notes and Research/
+Notes and Research.zip
+/sandbox/
+!/app/sandbox/
+test_payload.json
+.vscode/
+scripts/README.md
+to-do.txt
+pre-prod.md
+TODO.md
+test.txt
+
+# gVisor setup — API key must never be committed
+gvisor/ollama.env
+
+# Local identity-provider credentials and runtime state
+/auth/.env.keycloak
+/auth/.env.auth0
+/auth/.env.models
+/auth/.env.typesafe
 /auth/.runtime/
 /auth/README.local.md
-*.lock
 
-# Retained local historical material that was never a release asset
-/sandbox/
-/tracker/
-/Notes and Research/
-/Notes and Research.zip
-/history/TODO.md
-/test.txt
-/Research
-/PROMPTRAIL_GATEWAY_PLAN.md
-/history

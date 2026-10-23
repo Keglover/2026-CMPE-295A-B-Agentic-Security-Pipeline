@@ -1,0 +1,63 @@
+# =============================================================================
+# Policy Enforcement Layer — Threshold Configuration
+# =============================================================================
+# Project Plan Ref: Tasks 4.4, 4.5 (Phase 4 — Core Development: Policy Engine)
+#
+# This file externalizes the policy score→action mapping that is currently
+# hardcoded in app/policy/engine.py. Once config_loader.py is implemented,
+# the policy engine will read from this file at startup and support hot-reload.
+#
+# TODO: [ ] Task 4.4 — Wire config_loader.py to read this file at startup
+# TODO: [ ] Task 4.5 — Implement file-watch or config endpoint for hot-reload
+# TODO: [ ] Task 2.15 — Add fail_closed_default to handle Risk Engine outages
+# =============================================================================
+
+version: "1.0"
+
+# ---------------------------------------------------------------------------
+# Score-to-Action Thresholds
+# ---------------------------------------------------------------------------
+# The policy engine maps risk scores to actions using these boundaries.
+# Each threshold defines the MINIMUM score required for that action.
+# Evaluation order: BLOCK → QUARANTINE → REQUIRE_APPROVAL → SANITIZE → ALLOW
+thresholds:
+  block: 80          # score >= 80 → BLOCK (malicious, deny immediately)
+  quarantine: 60     # score >= 60 → QUARANTINE (high risk, isolate)
+  require_approval: 35  # score >= 35 → REQUIRE_APPROVAL (medium risk, human sign-off)
+  sanitize: 15       # score >= 15 → SANITIZE (low risk, flag content)
+  # score < 15 → ALLOW (safe, proceed)
+
+# ---------------------------------------------------------------------------
+# High-Attention Category Overrides
+# ---------------------------------------------------------------------------
+# Categories listed here force a minimum action of REQUIRE_APPROVAL
+# when detected, even if the risk score alone would only trigger SANITIZE.
+# This implements the "bump to approval" logic from the policy engine.
+high_attention_categories:
+  - TOOL_COERCION
+  - DATA_EXFILTRATION
+
+# Minimum score required for high-attention override to activate
+high_attention_min_score: 15
+
+# ---------------------------------------------------------------------------
+# Fail-Closed Defaults
+# ---------------------------------------------------------------------------
+# When upstream components (Risk Engine) are unreachable, the policy engine
+# must fail closed. These settings control that behavior.
+fail_closed:
+  default_action: BLOCK
+  default_reason: "Risk Engine unreachable — fail-closed to BLOCK"
+  log_as_error: true
+
+# ---------------------------------------------------------------------------
+# Future: Per-Tool Policy Overrides (Task 4.8)
+# ---------------------------------------------------------------------------
+# TODO: [ ] Task 4.8 — Implement tool-specific policy overrides
+# tool_overrides:
+#   fetch_url:
+#     min_action: REQUIRE_APPROVAL   # Always require approval for fetch_url
+#     reason: "External network access requires elevated scrutiny"
+#   write_note:
+#     min_action: SANITIZE
+#     reason: "Filesystem writes require content sanitization"

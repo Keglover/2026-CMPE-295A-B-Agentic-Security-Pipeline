@@ -1,0 +1,13 @@
+{
+  "name": "02 Tools",
+  "method": "GET",
+  "url": "{{baseUrl}}/tools",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": null,
+  "expected": {
+    "status": 200,
+    "response_keys": ["allowed_tools"]
+  }
+}
