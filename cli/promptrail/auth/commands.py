@@ -10,9 +10,7 @@ import keyring
 import typer
 
 from promptrail.auth.device import DeviceLogin, LoginError, VerifiedIdentity
-from promptrail.client import GatewayClient
-from promptrail.config import SERVICE, LEGACY_SERVICE, get_token, load_settings, set_token
-from promptrail.models import EvaluationRequest
+from promptrail.config import SERVICE, get_token, load_settings, set_token
 
 app = typer.Typer(no_args_is_help=True, help="Authenticate with the gateway's configured identity provider.")
 
@@ -22,44 +20,39 @@ app = typer.Typer(no_args_is_help=True, help="Authenticate with the gateway's co
 def login(
     gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = None,
     no_store: Annotated[bool, typer.Option("--no-store", help="Verify login without persisting the token.")] = False,
-    verify_evaluation: Annotated[bool, typer.Option("--verify-evaluation", help="Check authenticated evaluation after login.")] = False,
 ):
     """Sign in through the browser and verify the credential with the gateway."""
-    _authenticate(gateway_url, no_store, verify_evaluation, signup=False)
+    _authenticate(gateway_url, no_store, signup=False)
 
 
 @app.command("signup")
 def signup(
     gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = None,
     no_store: Annotated[bool, typer.Option("--no-store")] = False,
-    verify_evaluation: Annotated[bool, typer.Option("--verify-evaluation")] = False,
 ):
     """Create an account in the identity provider's browser flow, then sign in."""
-    _authenticate(gateway_url, no_store, verify_evaluation, signup=True)
+    _authenticate(gateway_url, no_store, signup=True)
 
 
-def _authenticate(gateway_url, no_store, verify_evaluation, *, signup):
+def _authenticate(gateway_url, no_store, *, signup):
+    """Run browser authorization and gateway verification before optional secure storage."""
     try:
         settings = load_settings(gateway_url)
+        # Fail before starting browser login if the requested persistent session cannot be stored securely.
         if not no_store and keyring.get_keyring().priority <= 0:
             raise LoginError("SECURE_KEYRING_UNAVAILABLE")
         with DeviceLogin(settings) as flow:
             challenge = flow.begin(signup=True) if signup else flow.begin()
             if signup:
                 typer.echo("In the identity-provider browser page choose Register, then create your account.")
-                typer.echo("Passwords stay with the identity provider. Signup does not grant reviewer or tool execution access.")
+                typer.echo("Passwords stay with the identity provider. Signup grants basic gateway access only.")
             typer.echo("Human intervention required: open this URL and authorize the displayed device code.")
             typer.echo(challenge.verification_uri_complete or challenge.verification_uri)
             typer.echo("Device code: " + challenge.user_code)
             typer.echo(f"Waiting for browser authorization (expires in {challenge.expires_in} seconds).")
             token = flow.poll(challenge)
             identity = flow.verify(token)
-            if verify_evaluation:
-                with GatewayClient(settings, token=token.get_secret_value()) as client:
-                    result = client.evaluate(EvaluationRequest(content="Verify authenticated evaluation."))
-                if result.status != "evaluated" or result.execution_requirement.value != "NONE":
-                    raise LoginError("AUTHENTICATED_EVALUATION_FAILED")
-                typer.echo("Authenticated evaluation succeeded; no tool was executed.")
+            # Browser success alone is insufficient: save only after gateway identity/permission verification.
             if not no_store:
                 set_token(settings.gateway_url, token.get_secret_value())
             typer.echo("Login verified by the gateway.")
@@ -88,6 +81,7 @@ def status(gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = N
            json_output: Annotated[bool, typer.Option("--json")] = False):
     """Ask the gateway to verify the current token; never trust decoded JWT claims locally."""
     def report(value):
+        """Format verified identity or a safe unauthenticated reason without credentials."""
         if json_output:
             typer.echo(json.dumps(value))
         elif value["authenticated"]:
@@ -104,6 +98,7 @@ def status(gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = N
             raise typer.Exit(1)
         from pydantic import SecretStr
         with DeviceLogin(settings) as flow:
+            # Revalidate with the selected gateway on every status check, including token expiry.
             identity = flow.inspect_identity(SecretStr(token))
         report({"authenticated": True, **identity.model_dump()})
     except LoginError as error:
@@ -117,9 +112,11 @@ def status(gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = N
 @app.command("signout")
 @app.command("logout")
 def logout(gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = None):
+    """Delete the gateway-scoped keyring entry and report any environment override."""
+    # This is local signout; it neither revokes server-issued JWTs nor clears browser SSO cookies.
     try:
         settings = load_settings(gateway_url)
-        for service in (SERVICE, LEGACY_SERVICE):
+        for service in (SERVICE,):
             try:
                 keyring.delete_password(service, settings.gateway_url)
             except keyring.errors.PasswordDeleteError:
@@ -128,6 +125,6 @@ def logout(gateway_url: Annotated[str | None, typer.Option("--gateway-url")] = N
         typer.echo("Local credential could not be removed.", err=True)
         raise typer.Exit(2)
     typer.echo("Local keyring credential removed. Issued tokens expire on the server's schedule.")
-    for name in ("PROMPTRAIL_AUTH_TOKEN", "JEV_AUTH_TOKEN"):
+    for name in ("PROMPTRAIL_AUTH_TOKEN",):
         if os.getenv(name):
             typer.echo(name + " still supplies a credential; unset it to stop using that override.", err=True)

@@ -37,7 +37,7 @@ def login(monkeypatch):
             state["order"].append("verify")
             if "error" in state:
                 raise state["error"]
-            return SimpleNamespace(permissions=["jev:evaluate"])
+            return SimpleNamespace(permissions=["promptrail:access"])
     monkeypatch.setattr(commands, "DeviceLogin", Flow)
     monkeypatch.setattr(commands.keyring, "get_keyring", lambda: SimpleNamespace(priority=1))
     def save(*args):
@@ -91,8 +91,7 @@ def test_logout_removes_only_scoped_credential(monkeypatch):
     result = runner.invoke(app, ["auth", "logout", "--gateway-url", "http://127.0.0.1:8003"])
     assert result.exit_code == 0
     assert [call.args for call in delete.call_args_list] == [
-        (commands.SERVICE, "http://127.0.0.1:8003"),
-        (commands.LEGACY_SERVICE, "http://127.0.0.1:8003")]
+        (commands.SERVICE, "http://127.0.0.1:8003")]
 
 
 def test_keyboard_interrupt_is_safe(login):
@@ -100,24 +99,6 @@ def test_keyboard_interrupt_is_safe(login):
     result = runner.invoke(app, ["auth", "login", "--no-store"])
     assert result.exit_code == 130
     assert "save" not in login["order"]
-
-
-def test_no_store_can_verify_authenticated_evaluation(login, monkeypatch):
-    class Client:
-        def __init__(self, settings, token):
-            assert token == "private-access-token"
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def evaluate(self, request):
-            return SimpleNamespace(status="evaluated", execution_requirement=SimpleNamespace(value="NONE"))
-    monkeypatch.setattr(commands, "GatewayClient", Client)
-    result = runner.invoke(app, ["auth", "login", "--no-store", "--verify-evaluation"])
-    assert result.exit_code == 0
-    assert "Authenticated evaluation succeeded" in result.output
-    assert "save" not in login["order"]
-    assert "private-access-token" not in result.output
 
 
 def test_signin_alias_verifies_before_storage(login):

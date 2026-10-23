@@ -11,16 +11,16 @@ from promptrail.config import Settings
 
 @pytest.fixture
 def device_server():
-    issuer = "http://127.0.0.1:8080/realms/jev"
+    issuer = "http://127.0.0.1:8080/realms/promptrail"
     state = {"profile": {"mode": "required", "provider": "keycloak", "issuer": issuer,
-        "client_id": "jev-cli", "audience": "jev-gateway", "scopes": ["openid", "jev:evaluate"]},
+        "client_id": "promptrail-cli", "audience": "promptrail-gateway", "scopes": ["openid", "promptrail:access"]},
         "metadata": {"issuer": issuer, "device_authorization_endpoint": issuer + "/device",
                      "token_endpoint": issuer + "/token"},
         "challenge": {"device_code": "private-device-code", "user_code": "ABCD-EFGH",
                       "verification_uri": issuer + "/verify", "expires_in": 100, "interval": 5},
         "tokens": [(200, {"access_token": "private-access-token", "token_type": "Bearer"})],
-        "identity": {"subject": "user-1", "issuer": issuer, "audience": "jev-gateway", "provider": "keycloak",
-                     "permissions": ["jev:evaluate"], "expires_at": int(time.time()) + 300},
+        "identity": {"subject": "user-1", "issuer": issuer, "audience": "promptrail-gateway", "provider": "keycloak",
+                     "permissions": ["promptrail:access"], "expires_at": int(time.time()) + 300},
         "calls": [], "sleeps": [], "clock": 0.0, "identity_status": 200}
     def handle(request):
         state["calls"].append(request)
@@ -58,13 +58,13 @@ def test_keycloak_device_flow_and_gateway_verification(device_server):
         assert "private-access-token" not in repr(token)
         assert flow.verify(token).subject == "user-1"
     device = next(call for call in device_server["calls"] if str(call.url).endswith("/device"))
-    assert parse_qs(device.content.decode()) == {"client_id": ["jev-cli"], "scope": ["openid jev:evaluate"]}
+    assert parse_qs(device.content.decode()) == {"client_id": ["promptrail-cli"], "scope": ["openid promptrail:access"]}
     assert device_server["sleeps"] == [5]
 
 
 def test_auth0_adapter_adds_audience(device_server):
     profile = LoginProfile.model_validate(device_server["profile"] | {"provider": "auth0"})
-    assert provider_for(profile).device_parameters(profile)["audience"] == "jev-gateway"
+    assert provider_for(profile).device_parameters(profile)["audience"] == "promptrail-gateway"
 
 
 def test_pending_and_slow_down_intervals(device_server):
@@ -181,7 +181,7 @@ def test_signup_runs_the_same_verified_device_flow(device_server):
     assert identity.subject == "user-1"
 
 
-def test_generic_oidc_scopes_do_not_require_jev_vocabulary(device_server):
+def test_generic_oidc_scopes_are_supported(device_server):
     device_server["profile"].update(provider="oidc", scopes=["openid", "example:inspect"])
     device_server["identity"].update(provider="oidc", permissions=["example:inspect"])
     with device_server["flow"]() as flow:

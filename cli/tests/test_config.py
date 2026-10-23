@@ -20,13 +20,13 @@ def test_allowed_gateway(url):
 
 
 def test_env_credential_precedes_keyring(monkeypatch):
-    monkeypatch.setenv("JEV_AUTH_TOKEN", "environment-token")
+    monkeypatch.setenv("PROMPTRAIL_AUTH_TOKEN", "environment-token")
     monkeypatch.setattr(config.keyring, "get_password", lambda *args: pytest.fail("Unexpected keyring access"))
     assert config.get_token("https://gateway.example.com") == "environment-token"
 
 
 def test_headless_keyring_without_token(monkeypatch):
-    monkeypatch.delenv("JEV_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("PROMPTRAIL_AUTH_TOKEN", raising=False)
     def unavailable(*args):
         raise keyring.errors.NoKeyringError("No secure backend")
     monkeypatch.setattr(config.keyring, "get_password", unavailable)
@@ -34,7 +34,7 @@ def test_headless_keyring_without_token(monkeypatch):
 
 
 def test_keyring_credential_scoped_by_gateway(monkeypatch):
-    monkeypatch.delenv("JEV_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("PROMPTRAIL_AUTH_TOKEN", raising=False)
     received = []
     monkeypatch.setattr(config.keyring, "get_password", lambda *args: received.append(args) or "stored-token")
     assert config.get_token("https://gateway.example.com") == "stored-token"
@@ -42,22 +42,16 @@ def test_keyring_credential_scoped_by_gateway(monkeypatch):
 
 
 def test_bad_credential_cannot_be_forwarded(monkeypatch):
-    monkeypatch.setenv("JEV_AUTH_TOKEN", "secret\nAuthorization: other")
+    monkeypatch.setenv("PROMPTRAIL_AUTH_TOKEN", "secret\nAuthorization: other")
     with pytest.raises(ValueError):
         config.get_token("https://gateway.example.com")
 
 
-def test_promptrail_settings_override_legacy_environment(monkeypatch, tmp_path):
-    monkeypatch.setenv("PROMPTRAIL_GATEWAY_URL", "https://gateway.example.com")
-    monkeypatch.setenv("JEV_GATEWAY_URL", "https://legacy.example.com")
-    monkeypatch.setenv("PROMPTRAIL_AUDIT_PATH", str(tmp_path / "new.jsonl"))
-    settings = config.load_settings()
-    assert settings.gateway_url == "https://gateway.example.com"
-    assert settings.audit_path == tmp_path / "new.jsonl"
+def test_explicit_gateway_precedes_environment(monkeypatch):
+    monkeypatch.setenv("PROMPTRAIL_GATEWAY_URL", "https://environment.example")
+    assert config.load_settings("https://explicit.example").gateway_url == "https://explicit.example"
 
 
-def test_promptrail_token_does_not_reuse_legacy_keyring(monkeypatch):
-    monkeypatch.setenv("PROMPTRAIL_AUTH_TOKEN", "new-token")
-    monkeypatch.setenv("JEV_AUTH_TOKEN", "old-token")
-    monkeypatch.setattr(config.keyring, "get_password", lambda *a: pytest.fail("Unexpected keyring access"))
-    assert config.get_token("https://gateway.example.com") == "new-token"
+def test_environment_gateway_is_used(monkeypatch):
+    monkeypatch.setenv("PROMPTRAIL_GATEWAY_URL", "https://gateway.example")
+    assert config.load_settings().gateway_url == "https://gateway.example"

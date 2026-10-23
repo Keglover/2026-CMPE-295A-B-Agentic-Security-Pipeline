@@ -1,126 +1,188 @@
-# Gateway identity setup for Promptrail testing
+# Authentication gateway and local identity provider
 
-Promptrail is installed separately from the gateway. This directory supplies a
-local Keycloak realm and an authenticated MOCK gateway for integration testing.
-It is not required on teammate computers using an existing shared gateway.
+This folder contains only the server-side authentication needed by Promptrail.
+The gateway exposes four endpoints: public `GET /health`, `GET /auth/config`,
+`GET /auth/registration`, and protected `GET /auth/whoami`. There are no policy,
+evaluation, approval, agent-token or execution routes.
 
-The larger gateway/database plan is on hold. This round covers standalone CLI
-packaging, signup, signin, verified user access and team feedback. Existing agent
-and review mechanisms are carried forward without new session features.
+## Files
 
-## Start a private local environment
+| File | Responsibility |
+| --- | --- |
+| `__init__.py` | Server package boundary used by `auth.gateway:app` |
+| `gateway.py` | Authentication-only HTTP API; basic access enforcement |
+| `oidc.py` | Pinned OIDC discovery, bounded JWKS cache and RS256 verification |
+| `setup.py` | Private config generation and opt-in local signup configuration |
+| `compose.yml` | Local Keycloak service and persistent named data volume |
+| `keycloak-realm.json` | Public client, gateway audience and one basic-access role |
+| `env.example` | Local gateway/admin configuration template |
+| `requirements.txt` | Authentication server dependencies, separate from the CLI |
+| `tests/` | JWT, access enforcement, realm and private setup tests |
 
-From the repository root, with Python 3.11+ and Docker Compose v2:
+## Run locally
 
-```bash
-python3 -m venv src/mvp/.venv
-src/mvp/.venv/bin/python -m pip install -r src/mvp/requirements.txt
-src/mvp/.venv/bin/python -m pip install -e './cli[test]'
-src/mvp/.venv/bin/python auth/setup-dev.py
-src/mvp/.venv/bin/python auth/setup-signing.py
-docker compose --env-file auth/.env.keycloak -f auth/docker-compose.keycloak.yml up -d
-docker compose -f auth/docker-compose.gateway-dev.yml up -d --build
-```
-
-Keycloak is available on `http://127.0.0.1:8080`; the authenticated gateway binds
-`http://127.0.0.1:8003`. Wait for services to become healthy before login. The
-existing stack on port 8000 is separate. The development API forces MOCK tools
-and disables the optional LLM judge. It uses persistent protected identity and
-review metadata under `auth/.runtime` and never stores bearer tokens there.
-
-`auth/setup-dev.py` creates owner-only, ignored `auth/.env.keycloak` and
-`auth/README.local.md`. It preserves existing generated passwords. The latter
-lists local development accounts; never commit or share it as a package asset.
-Normal restart preserves Keycloak passwords through its named data volume.
-The realm template maps subject, API audience and assigned realm roles into
-access tokens. Existing realms may need `auth/sync-client-mappers.py` and
-`auth/sync-dev-users.py` after a template upgrade; neither resets passwords.
-
-## Opt in to browser signup
-
-Registration is disabled by default. An administrator can enable it in this
-local development realm and grant newly registered users evaluation access:
+Follow the [root quickstart](../CLI_README.md). `setup.py` creates `auth/.env` with
+mode 0600 and a generated bootstrap administrator password; existing values are
+preserved. The Keycloak administrator is `promptrail-admin`. Use the private
+file locally if administrator console access is needed; do not commit or share it.
+No fixed user credentials are created. Users register their own accounts after
+an administrator opts in:
 
 ```bash
-src/mvp/.venv/bin/python auth/configure-registration.py --enable
-JEV_SELF_REGISTRATION_ENABLED=true \
-  docker compose -f auth/docker-compose.gateway-dev.yml up -d --no-build
+.venv/bin/python auth/setup.py --enable-signup
+# Restart the gateway process to reload auth/.env.
 ```
 
-The script refuses unexpected default-role grants rather than silently exposing
-execution/reviewer access. It authenticates only to the fixed local Keycloak
-admin endpoint using the private bootstrap file; no administrator key goes into
-Promptrail. The gateway registration flag advertises this operator choice on
-`/auth/registration`. `/auth/config` stays backward compatible. Both the realm
-and gateway must be configured; a flag alone cannot enable provider signup.
+This enables browser registration, grants only `promptrail:access` through the
+realm default role and updates the gateway advertisement flag. The script refuses
+unexpected default-role grants. It never adds execution/reviewer privileges.
+Disable signup without deleting accounts or changing their roles:
 
 ```bash
-export PROMPTRAIL_GATEWAY_URL=http://127.0.0.1:8003
-promptrail auth signup
+.venv/bin/python auth/setup.py --disable-signup
+# Restart the gateway process to reload auth/.env.
 ```
 
-Use a fresh private browser context, open the displayed device URL, choose
-**Register**, create the account, and complete the device authorization. The CLI
-never collects a password. The gateway verifies the resulting JWT and permissions
-before the CLI stores it. On a headless machine add `--no-store --verify-evaluation`.
-
-Disable enrollment later with:
+Keycloak listens on loopback port 8080. Run the gateway separately on loopback
+port 8003:
 
 ```bash
-src/mvp/.venv/bin/python auth/configure-registration.py --disable
-JEV_SELF_REGISTRATION_ENABLED=false \
-  docker compose -f auth/docker-compose.gateway-dev.yml up -d --no-build
+.venv/bin/python -m uvicorn auth.gateway:app --host 127.0.0.1 --port 8003 --env-file auth/.env
 ```
+Gateway settings are `PROMPTRAIL_AUTH_MODE=required`, `PROMPTRAIL_OIDC_PROVIDER`,
+`PROMPTRAIL_OIDC_ISSUER`, `PROMPTRAIL_OIDC_CLIENT_ID`, `PROMPTRAIL_OIDC_AUDIENCE`
+and `PROMPTRAIL_SELF_REGISTRATION_ENABLED`. Disabled authentication is rejected.
 
-Disabling signup does not delete existing accounts or change their roles.
-For a shared service, administrators must additionally configure HTTPS, email
-verification/SMTP and enrollment rules. Do not expose this `start-dev` realm as
-production identity hosting. Auth0 is a tested wire adapter scaffold, not a
-provisioned signup tenant.
+Access tokens last five minutes; device codes last ten. Assigned provider roles
+and requested scopes must both include `promptrail:access`. The gateway checks
+signature, issuer, audience, client and expiry before returning identity. Invalid
+credentials get a safe reason code; upstream bodies, passwords and tokens are not
+echoed. `auth status` performs server verification rather than trusting decoded
+JWT text in the CLI. No gateway signing key or model API key is required.
 
-## User access and session lifetime
+## Existing development installations
+
+The new realm/client/audience are `promptrail`, `promptrail-cli`, and
+`promptrail-gateway`. Earlier `jev` realm users are not migrated automatically.
+Previous containers/volumes are preserved local historical state. Unused private
+credentials and runtime files were moved to the private pre-cleanup recovery
+copy outside this project; they are not part of the new implementation. Stop conflicting old services before
+starting this Compose project. Do not use `down --volumes` if accounts must survive.
+Existing accounts/passwords in a preserved realm survive ordinary restarts.
+
+Keycloak startup import skips an existing realm; changing the JSON file does not
+migrate an already imported realm. See [Keycloak realm import](https://www.keycloak.org/server/importExport).
+The setup script intentionally updates only enrollment and the safe default role.
+A browser can reuse its old SSO identity: use a fresh private context when testing
+signup. If a device code expires, rerun the CLI and use its new code. For a VM,
+forward both ports and keep the issuer hostname consistent.
+
+## Shared deployment and verification
+
+The loopback `start-dev` configuration is for development. A shared deployment
+needs reachable HTTPS URLs, managed identity storage, SMTP/email verification,
+enrollment policy and operational ownership. The current gateway supports
+Keycloak only. Auth0 server configuration, permissions verification and tenant
+setup are deferred to the gateway plan; no Auth0 implementation is kept here.
 
 ```bash
-promptrail auth signin
-promptrail auth status
-promptrail auth status --json
-promptrail eval 'Check a public sample.' --json
-promptrail auth signout
+.venv/bin/python -m pytest auth/tests -q
 ```
 
-The gateway trusts issuer, signature, audience, authorized client, expiry and
-assigned permissions, not caller-provided role fields. Requested scopes are
-intersected with assigned roles; requesting a role does not grant it. New signup
-accounts receive `jev:evaluate` only. An administrator must explicitly assign
-additional roles and configure corresponding scopes before any extra access.
+Tests use real RSA signatures with fake provider metadata and need no live
+provider. Browser signup/signin and OS-keyring availability are separate acceptance
+checks. Models, sandboxing, structured audit storage and agent sessions are future
+work in the maintainer-local `PROMPTRAIL_GATEWAY_PLAN.md` (excluded from this release).
 
-The local realm issues five-minute access tokens and ten-minute device codes.
-Promptrail stores a verified access token in the system keyring, scoped to gateway
-URL. It does not store refresh tokens; sign in again after expiry. `--no-store`
-verifies login for the current process only. `signout` clears local credentials,
-not browser SSO or every issued JWT. See [CLI user sessions](../cli/README.md#how-user-sessions-work).
+## Function reference
 
-If browser login reports a missing restart cookie, request a fresh device code
-and open its entry URL in a single normal/private browser context. Login may
-automatically reuse an existing browser account; check the intended identity.
-A VM browser may need SSH port forwarding for both 8080 and 8003; use a consistent
-issuer hostname. Shared deployments need reachable HTTPS gateway/issuer URLs.
+### HTTP API — `gateway.py`
 
-## Verification and feedback
+| Function | Called by | Responsibility and result |
+| --- | --- | --- |
+| `lifespan(app)` | ASGI startup | Validate server configuration before accepting requests; unsupported/disabled auth prevents startup |
+| `response_privacy(request, call_next)` | Every HTTP request | Add `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` to responses |
+| `health()` | `GET /health` | Report process availability and `authentication` capability; does not check Keycloak availability or authorize execution |
+| `configuration()` | `GET /auth/config` | Return public issuer/client/audience/scopes; never the bootstrap password |
+| `registration()` | `GET /auth/registration` | Advertise the operator's signup setting; does not enable enrollment in Keycloak |
+| `whoami(request)` | `GET /auth/whoami` | Verify a bearer token and require `promptrail:access`; return subject, issuer, audience, provider, permissions and expiry |
 
-CLI-only tests require no backend. For backend integration, from the repo root:
+`whoami()` runs the blocking verifier in a worker thread so metadata requests
+and RSA verification do not block the asynchronous request loop. A missing or
+invalid token returns HTTP 401; a verified identity without basic access returns
+403; unavailable identity metadata or invalid server configuration returns 503.
+Only a safe `reason_code` is returned on these failures. Other paths return 404.
 
-```bash
-PYTHONPATH=src/mvp JEV_AUTH_MODE=disabled REAL_TOOLS=false LLM_JUDGE_ENABLED=false \
-  src/mvp/.venv/bin/python -m pytest cli/tests -q
+### Token verification — `oidc.py`
 
-cd src/mvp
-JEV_AUTH_MODE=disabled REAL_TOOLS=false LLM_JUDGE_ENABLED=false \
-  AUDIT_LOG_PATH=/tmp/promptrail-auth-tests.ndjson \
-  .venv/bin/python -m pytest tests/test_authentication.py tests/test_keycloak_configuration.py tests/test_registration.py -q
-```
+| Class/function | Purpose |
+| --- | --- |
+| `AuthenticationError(code, status=401)` | Carry a safe public code and HTTP status; no raw upstream body |
+| `validated_url(value)` | Reject embedded credentials, query/fragment, malformed ports and non-loopback plaintext HTTP |
+| `origin(value)` | Normalize scheme/hostname/effective port for origin comparisons |
+| `OIDCSettings` / `__post_init__()` | Immutable verification authority; require `required` mode and `keycloak` provider and validate configured identifiers |
+| `load_settings()` | Read `PROMPTRAIL_*` server environment settings and local defaults |
+| `Identity` | Verified claims and the effective permission set; contains no bearer token |
+| `TokenVerifier.__init__(settings, transport, clock)` | Initialize the empty signing-key cache, lock and injectable test dependencies |
+| `TokenVerifier._json(url)` | Fetch only the configured issuer origin, with redirects/proxy inheritance disabled, a five-second HTTP timeout and a 1 MiB response limit |
+| `TokenVerifier._refresh()` | Check discovery issuer and JWKS URL, accept up to 100 supported public-key entries, reject ambiguous/private signing-key material, then replace the cache |
+| `TokenVerifier.verify(token)` | Enforce bounded token/header shape, obtain the trusted key, verify RS256 claims, validate client/subject/timestamps and derive permissions |
+| `get_verifier(settings)` | Reuse up to eight verifier instances by immutable settings so requests share key caches |
 
-Team feedback should include package/commit version, platform, operation and safe
-reason code. Exclude credentials and raw private content. Anonymous/invalid-token
-requests must fail, self-signup must not grant tools/review, and an expired token
-must require fresh signin. Browser login is a separate human acceptance step.
+Verification order is important:
+
+1. An unverified header supplies only the key identifier (`kid`). It does not
+   choose the trusted issuer, audience or algorithm.
+2. Discovery must match the configured issuer exactly. Its signing-key URL must
+   have the same origin. Only supported RSA signing keys are accepted.
+3. The verifier checks the signature with RS256 and requires `exp`, `iat`, `iss`,
+   `aud` and `sub`. It also checks `azp` against the public CLI client and validates
+   subject/timestamp types and ordering.
+4. Effective permissions are the intersection of requested token scopes and
+   signed `realm_access.roles`. The HTTP handler separately requires basic access.
+
+The cache uses monotonic time, expires after 300 seconds and limits refresh
+attempts to one per ten seconds. A lock coordinates concurrent refreshes.
+An expired cache cannot bypass a failed refresh. JWT expiry uses wall-clock time
+through the JWT library, rather than the cache's monotonic clock.
+
+This is signature-based access-token verification, not a live session/user
+lookup. Role changes or browser logout do not make an otherwise valid signed
+JWT immediately invalid here; it remains subject to its expiry and these checks.
+
+### Local configuration and enrollment — `setup.py`
+
+| Function | Inputs and effect |
+| --- | --- |
+| `read_private(path)` | Read an owner-owned regular file with no group/other permissions; refuse symlinks on supported POSIX systems, cap input at 64 KiB and parse without interpolation; return parsed values plus original text |
+| `initialize(path=ENV_PATH)` | Preserve existing valid private configuration, or generate a bootstrap password and create `auth/.env` exclusively with mode 0600 |
+| `configure(client, headers, enabled=...)` | Contact the fixed local realm admin URL; before enabling signup, verify safe default-role membership and add only `promptrail:access` if absent; preserve other realm settings |
+| `configure.call(method, path, ...)` | Internal admin-request helper; accept only expected successful status codes and otherwise stop the setup operation |
+| `set_registration(enabled, path=ENV_PATH)` | Read private admin credentials, obtain an in-memory admin token, update the realm, then update the local advertisement flag |
+| `main()` | Parse `--enable-signup` / `--disable-signup`, run setup and return 0 or a safe failure exit 2 |
+
+The admin token never goes into the CLI keyring or configuration file. The
+script updates the local signup advertisement only after the realm operation
+succeeds. Keycloak changes and the file update are separate operations, not a
+transaction; on setup failure inspect both settings before retrying. Restart the
+gateway after changing its `.env` so it reloads the advertisement value.
+
+## Configuration backbone
+
+| File/field | Why it matters |
+| --- | --- |
+| `__init__.py` | Defines the server package used by `auth.gateway:app`; never shipped inside the CLI wheel |
+| `compose.yml`: loopback port mapping | Makes the development issuer reachable at the exact hostname advertised in tokens/discovery |
+| `compose.yml`: `keycloak_data` | Persists realm accounts and passwords across ordinary restarts |
+| `compose.yml`: realm bind mount | Imports the public realm template on first creation; does not overwrite an existing realm |
+| `keycloak-realm.json`: `promptrail-cli` | Public device-flow client; no client secret and no direct password grant |
+| Realm subject/audience/role mappers | Include `sub`, gateway `aud`, and assigned realm roles in access tokens for verification |
+| Realm default client scope | Requests `promptrail:access`; actual role assignment is still required |
+| Realm token/device lifetimes | Five-minute JWTs and ten-minute device challenges; neither is an agent session |
+| `env.example` | Public variable names/defaults used by setup; the generated `auth/.env` is private |
+| `requirements.txt` | Server dependencies only; the terminal wheel does not depend on FastAPI, Uvicorn or PyJWT |
+
+The focused test files are `tests/test_gateway.py` (real RSA signatures, cache,
+claim/permission failures, HTTP boundaries and missing execution routes) and
+`tests/test_setup.py` (private config, stable initialization, safe enrollment and
+realm configuration). Test functions are not runtime API entry points.
